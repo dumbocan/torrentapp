@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configuración - TorrentStream</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/js/all.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .gradient-bg { background: linear-gradient(135deg, #1e293b 0%, #334155 100%); }
+        .toggle-switch { transition: all 0.3s ease; }
+        .toggle-switch:checked { background-color: #3b82f6; }
+        .toggle-switch:checked::after { transform: translateX(1.25rem); }
+        .toggle-switch::after { content: ''; transition: transform 0.3s ease; }
+    </style>
+</head>
+<body class="gradient-bg min-h-screen text-white">
+    <!-- Header -->
+    <header class="bg-slate-900/90 backdrop-blur-sm border-b border-slate-700 sticky top-0 z-50">
+        <div class="container mx-auto px-4 py-4">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center">
+                        <i class="fas fa-magnet text-white text-lg"></i>
+                    </div>
+                    <h1 class="text-2xl font-bold text-white">TorrentStream</h1>
+                </div>
+                <nav class="hidden md:flex space-x-6">
+                    <a href="index.html" class="text-slate-300 hover:text-white transition-colors">Inicio</a>
+                    <a href="library.html" class="text-slate-300 hover:text-white transition-colors">Biblioteca</a>
+                    <a href="settings.html" class="text-white font-medium">Configuración</a>
+                </nav>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="container mx-auto px-4 py-8">
+        <div class="max-w-4xl mx-auto">
+            <!-- Header -->
+            <div class="mb-8">
+                <h2 class="text-3xl font-bold mb-2">Configuración</h2>
+                <p class="text-slate-400">Personaliza tu experiencia en TorrentStream</p>
+            </div>
+
+            <!-- Settings Sections -->
+            <div class="space-y-8">
+                <!-- General Settings -->
+                <div class="bg-slate-800/50 backdrop-blur-sm rounded-xl p-6 border border-slate-700">
+                    <h3 class="text-xl font-semibold mb-6 flex items-center">
+                        <i class="fas fa-cog mr-3 text-blue-500"></i>
+                        Configuración General
+                    </h3>
+                    
+                    <div class="space-y-6">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h4 class="font-medium text-white">Iniciar con Windows</h4>
+                                <p class="text-sm text-slate-400">Abrir TorrentStream al iniciar el sistema</p>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" class="sr-only peer" id="startupToggle">
+                                <div class="w-11 h-6 bg-slate-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                            </label>
+                        </div>
+
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h4 class="font-medium text-white">Minimizar a la bandeja</h4>
+                                <p class="text-sm text-slate-400">Minimizar la aplicación a la bandeja del sistema</p>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" class="sr-only peer" id="minimizeToggle" checked>
+                                <div class="w-11 h-6 bg-slate-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                            </label>
+                        </div>
+
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h4 class="font-medium text-white">Notificaciones</h4>
+                                <p class="text-sm text-slate-400">Mostrar notificaciones de descarga completada</p>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" class="sr-only peer" id="notificationsToggle" checked>
+                                <div class="w-11 h-6 bg-slate-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                            </label>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-white mb-2">Idioma de la interfaz</label>
+                            <select class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                <option value="es">Español</option>
+                                <option value="en">English</option>
+                                <option value="fr">Français</option>
+                                <option value="de">Deutsch</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Download Settings -->
+                <div class="bg-slate-800/50 backdrop-blur-sm rounded-xl p-6 border border-slate-700">
+                    <h3 class="text-xl font-semibold mb-6 flex items-center">
+                        <i class="fas fa-download mr-3 text-green-500"></i>
+                        Configuración de Descargas
+                    </h3>
+                    
+                    <div class="space-y-6">
+                        <div>
+                            <label class="block text-sm font-medium text-white mb-2">Directorio de descargas</label>
+                            <div class="flex items-center space-x-3">
+                                <input type="text" value="C:\Users\Usuario\Downloads\TorrentStream" 
+                                       class="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500" readonly>
+                                <button class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors">
+                                    Cambiar
+                                </button>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-white mb-2">Límite de descarga global</label>
+                            <div class="flex items-center space-x-3">
+                                <input type="range" min="0" max="100" value="0" 
+                                       class="flex-1 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer slider">
+                                <span class="text-slate-400 min-w-[80px]">Sin límite</span>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-white mb-2">Límite de subida global</label>
+                            <div class="flex items-center space-x-3">
+                                <input type="range" min="0" max="100" value="50" 
+                                       class="flex-1 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer slider">
+                                <span class="text-slate-400 min-w-[80px]">50 MB/s</span>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-white mb-2">Máximo de descargas simultáneas</label>
+                            <select class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                <option value="1">1</option>
+                                <option value="3" selected>3</option>
+                                <option value="5">5</option>
+                                <option value="10">10</option>
+                                <option value="unlimited">Sin límite</option>
+                            </select>
+                        </div>
+
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h4 class="font-medium text-white">Descarga secuencial</h4>
+                                <p class="text-sm text-slate-400">Descargar piezas en orden para reproducir mientras se descarga</p>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" class="sr-only peer" id="sequentialToggle" checked>
+                                <div class="w-11 h-6 bg-slate-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Privacy Settings -->
+                <div class="bg-slate-800/50 backdrop-blur-sm rounded-xl p-6 border border-slate-700">
+                    <h3 class="text-xl font-semibold mb-6 flex items-center">
+                        <i class="fas fa-shield-alt mr-3 text-purple-500"></i>
+                        Privacidad y Seguridad
+                    </h3>
+                    
+                    <div class="space-y-6">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h4 class="font-medium text-white">Modo anónimo</h4>
+                                <p class="text-sm text-slate-400">Ocultar tu IP y metadatos del cliente</p>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" class="sr-only peer" id="anonymousToggle">
+                                <div class="w-11 h-6 bg-slate-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                            </label>
+                        </div>
+
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h4 class="font-medium text-white">Cifrado de protocolo</h4>
+                                <p class="text-sm text-slate-400">Cifrar el tráfico de torrent para evitar el throttling de ISP</p>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" class="sr-only peer" id="encryptionToggle" checked>
+                                <div class="w-11 h-6 bg-slate-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                            </label>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-white mb-2">Lista de bloqueo de IP</label>
+                            <select class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                <option value="none">Ninguna</option>
+                                <option value="level1" selected>Level 1 (Básica)</option>
+                                <option value="level2">Level 2 (Ampliada)</option>
+                                <option value="custom">Personalizada</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-white mb-2">Puerto de entrada</label>
+                            <div class="flex items-center space-x-3">
+                                <input type="number" value="6881" 
+                                       class="w-24 px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                <button class="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white rounded-lg transition-colors">
+                                    Puerto aleatorio
+                                </button>
+                                <span class="text-sm text-slate-400">El puerto está abierto</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Player Settings -->
+                <div class="bg-slate-800/50 backdrop-blur-sm rounded-xl p-6 border border-slate-700">
+                    <h3 class="text-xl font-semibold mb-6 flex items-center">
+                        <i class="fas fa-play-circle mr-3 text-red-500"></i>
+                        Configuración del Reproductor
+                    </h3>
+                    
+                    <div class="space-y-6">
+                        <div>
+                            <label class="block text-sm font-medium text-white mb-2">Calidad de video por defecto</label>
+                            <select class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                <option value="auto" selected>Automática</option>
+                                <option value="480p">480p</option>
+                                <option value="720p">720p</option>
+                                <option value="1080p">1080p</option>
+                                <option value="4k">4K</option>
+                            </select>
+                        </div>
+
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h4 class="font-medium text-white">Subtítulos automáticos</h4>
+                                <p class="text-sm text-slate-400">Buscar y cargar subtítulos automáticamente</p>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" class="sr-only peer" id="subtitlesToggle" checked>
+                                <div class="w-11 h-6 bg-slate-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                            </label>
+                        </div>
+
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h4 class="font-medium text-white">Reproducción automática</h4>
+                                <p class="text-sm text-slate-400">Reproducir automáticamente al abrir un torrent</p>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" class="sr-only peer" id="autoplayToggle">
+                                <div class="w-11 h-6 bg-slate-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                            </label>
+                        </div>
+
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h4 class="font-medium text-white">Modo teatro</h4>
+                                <p class="text-sm text-slate-400">Activar modo teatro por defecto</p>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" class="sr-only peer" id="theaterToggle">
+                                <div class="w-11 h-6 bg-slate-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Save Button -->
+                <div class="flex justify-end">
+                    <button onclick="saveSettings()" 
+                            class="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-lg font-medium transition-colors flex items-center space-x-2">
+                        <i class="fas fa-save"></i>
+                        <span>Guardar Configuración</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-slate-900/50 border-t border-slate-700 py-8 mt-12">
+        <div class="container mx-auto px-4 text-center">
+            <p class="text-slate-400 text-sm">© 2025 TorrentStream. Usa responsablemente. Respeta los derechos de autor.</p>
+        </div>
+    </footer>
+
+    <script>
+        function saveSettings() {
+            // Collect all settings
+            const settings = {
+                startup: document.getElementById('startupToggle').checked,
+                minimizeToTray: document.getElementById('minimizeToggle').checked,
+                notifications: document.getElementById('notificationsToggle').checked,
+                sequentialDownload: document.getElementById('sequentialToggle').checked,
+                anonymousMode: document.getElementById('anonymousToggle').checked,
+                encryption: document.getElementById('encryptionToggle').checked,
+                subtitles: document.getElementById('subtitlesToggle').checked,
+                autoplay: document.getElementById('autoplayToggle').checked,
+                theaterMode: document.getElementById('theaterToggle').checked
+            };
+
+            // In a real implementation, this would save to localStorage or send to backend
+            console.log('Saving settings:', settings);
+            
+            // Show success message
+            showSuccessMessage();
+        }
+
+        function showSuccessMessage() {
+            // Create success notification
+            const notification = document.createElement('div');
+            notification.className = 'fixed top-20 right-4 bg-green-600 text-white px-6 py-3 rounded-lg shadow-lg z-50 flex items-center space-x-2';
+            notification.innerHTML = `
+                <i class="fas fa-check-circle"></i>
+                <span>Configuración guardada exitosamente</span>
+            `;
+            
+            document.body.appendChild(notification);
+            
+            // Remove after 3 seconds
+            setTimeout(() => {
+                notification.remove();
+            }, 3000);
+        }
+
+        // Range input handlers for speed limits
+        document.querySelectorAll('input[type="range"]').forEach(slider => {
+            slider.addEventListener('input', function() {
+                const value = this.value;
+                const unitSpan = this.nextElementSibling;
+                
+                if (value == 0) {
+                    unitSpan.textContent = 'Sin límite';
+                } else {
+                    unitSpan.textContent = value + ' MB/s';
+                }
+            });
+        });
+
+        // Load saved settings on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            // In a real implementation, this would load settings from storage
+            console.log('Loading saved settings...');
+        });
+    </script>
+</body>
+</html>

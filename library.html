@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Biblioteca - TorrentStream</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/js/all.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .gradient-bg { background: linear-gradient(135deg, #1e293b 0%, #334155 100%); }
+        .glass-effect { backdrop-filter: blur(10px); background: rgba(255, 255, 255, 0.1); }
+        .media-card { transition: all 0.3s ease; }
+        .media-card:hover { transform: translateY(-2px); box-shadow: 0 10px 25px rgba(0,0,0,0.2); }
+        .fade-in { animation: fadeIn 0.5s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body class="gradient-bg min-h-screen text-white">
+    <!-- Header -->
+    <header class="bg-slate-900/90 backdrop-blur-sm border-b border-slate-700 sticky top-0 z-50">
+        <div class="container mx-auto px-4 py-4">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center">
+                        <i class="fas fa-magnet text-white text-lg"></i>
+                    </div>
+                    <h1 class="text-2xl font-bold text-white">TorrentStream</h1>
+                </div>
+                <nav class="hidden md:flex space-x-6">
+                    <a href="index.html" class="text-slate-300 hover:text-white transition-colors">Inicio</a>
+                    <a href="library.html" class="text-white font-medium">Biblioteca</a>
+                    <a href="#" class="text-slate-300 hover:text-white transition-colors">Configuración</a>
+                </nav>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="container mx-auto px-4 py-8">
+        <!-- Library Header -->
+        <section class="mb-8">
+            <div class="flex items-center justify-between mb-6">
+                <h2 class="text-3xl font-bold">Mi Biblioteca</h2>
+                <div class="flex items-center space-x-4">
+                    <select id="filterSelect" class="px-4 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="all">Todo</option>
+                        <option value="movies">Películas</option>
+                        <option value="tv">Series</option>
+                        <option value="music">Música</option>
+                        <option value="completed">Completados</option>
+                        <option value="downloading">Descargando</option>
+                    </select>
+                    <select id="sortLibrarySelect" class="px-4 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="date">Fecha de descarga</option>
+                        <option value="name">Nombre</option>
+                        <option value="size">Tamaño</option>
+                        <option value="progress">Progreso</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Stats Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+                <div class="bg-slate-800/50 backdrop-blur-sm rounded-xl p-6 border border-slate-700">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-slate-400 text-sm">Total Descargado</p>
+                            <p class="text-2xl font-bold text-white">47.2 GB</p>
+                        </div>
+                        <div class="w-12 h-12 bg-blue-600 rounded-lg flex items-center justify-center">
+                            <i class="fas fa-download text-white"></i>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="bg-slate-800/50 backdrop-blur-sm rounded-xl p-6 border border-slate-700">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-slate-400 text-sm">Completados</p>
+                            <p class="text-2xl font-bold text-white">23</p>
+                        </div>
+                        <div class="w-12 h-12 bg-green-600 rounded-lg flex items-center justify-center">
+                            <i class="fas fa-check text-white"></i>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="bg-slate-800/50 backdrop-blur-sm rounded-xl p-6 border border-slate-700">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-slate-400 text-sm">En Descarga</p>
+                            <p class="text-2xl font-bold text-white">3</p>
+                        </div>
+                        <div class="w-12 h-12 bg-yellow-600 rounded-lg flex items-center justify-center">
+                            <i class="fas fa-spinner text-white"></i>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="bg-slate-800/50 backdrop-blur-sm rounded-xl p-6 border border-slate-700">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-slate-400 text-sm">Velocidad Actual</p>
+                            <p class="text-2xl font-bold text-white">12.5 MB/s</p>
+                        </div>
+                        <div class="w-12 h-12 bg-purple-600 rounded-lg flex items-center justify-center">
+                            <i class="fas fa-tachometer-alt text-white"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Library Content -->
+        <section>
+            <div id="libraryContent" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                <!-- Library items will be inserted here -->
+            </div>
+        </section>
+
+        <!-- Empty State -->
+        <div id="emptyLibrary" class="hidden text-center py-16">
+            <div class="w-24 h-24 bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-6">
+                <i class="fas fa-folder-open text-4xl text-slate-600"></i>
+            </div>
+            <h3 class="text-xl font-semibold text-white mb-2">Biblioteca vacía</h3>
+            <p class="text-slate-400 mb-6">No tienes contenido descargado aún</p>
+            <a href="index.html" class="inline-flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg transition-colors">
+                <i class="fas fa-search"></i>
+                <span>Buscar torrents</span>
+            </a>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-slate-900/50 border-t border-slate-700 py-8 mt-12">
+        <div class="container mx-auto px-4 text-center">
+            <p class="text-slate-400 text-sm">© 2025 TorrentStream. Usa responsablemente. Respeta los derechos de autor.</p>
+        </div>
+    </footer>
+
+    <script>
+        class LibraryManager {
+            constructor() {
+                this.libraryItems = this.loadMockLibraryData();
+                this.initializeLibrary();
+                this.setupEventListeners();
+            }
+
+            loadMockLibraryData() {
+                return [
+                    {
+                        id: 1,
+                        name: "Dune: Part Two",
+                        type: "movie",
+                        category: "movies",
+                        size: "4.2 GB",
+                        progress: 100,
+                        status: "completed",
+                        downloadDate: "2024-11-01",
+                        thumbnail: "https://m.media-amazon.com/images/I/61r4J6h4b8L._AC_SL1000_.jpg",
+                        duration: "2h 46min",
+                        quality: "1080p"
+                    },
+                    {
+                        id: 2,
+                        name: "The Bear - Season 3",
+                        type: "tv",
+                        category: "tv",
+                        size: "8.7 GB",
+                        progress: 100,
+                        status: "completed",
+                        downloadDate: "2024-10-28",
+                        thumbnail: "https://m.media-amazon.com/images/I/51K28pJ3L5L._AC_.jpg",
+                        episodes: 10,
+                        quality: "1080p"
+                    },
+                    {
+                        id: 3,
+                        name: "FL Studio 21",
+                        type: "software",
+                        category: "software",
+                        size: "1.1 GB",
+                        progress: 100,
+                        status: "completed",
+                        downloadDate: "2024-10-25",
+                        thumbnail: "https://www.image-line.com/images/fl-studio-21-logo.png",
+                        version: "21.0.3"
+                    },
+                    {
+                        id: 4,
+                        name: "Abbey Road - FLAC",
+                        type: "music",
+                        category: "music",
+                        size: "456 MB",
+                        progress: 100,
+                        status: "completed",
+                        downloadDate: "2024-10-20",
+                        thumbnail: "https://www.thebeatles.com/sites/default/files/styles/square-1-1/public/2021-10/AbbeyRoad_Square.jpg",
+                        artist: "The Beatles",
+                        tracks: 17
+                    },
+                    {
+                        id: 5,
+                        name: "Oppenheimer",
+                        type: "movie",
+                        category: "movies",
+                        size: "5.8 GB",
+                        progress: 67,
+                        status: "downloading",
+                        downloadDate: "2024-11-07",
+                        thumbnail: "https://m.media-amazon.com/images/I/71+1K+1S+4L._AC_SL1000_.jpg",
+                        quality: "4K",
+                        speed: "2.3 MB/s"
+                    },
+                    {
+                        id: 6,
+                        name: "Cyberpunk 2077",
+                        type: "game",
+                        category: "games",
+                        size: "45.2 GB",
+                        progress: 23,
+                        status: "downloading",
+                        downloadDate: "2024-11-06",
+                        thumbnail: "https://m.media-amazon.com/images/I/71QHBdF1SyL._AC_SL1000_.jpg",
+                        platform: "PC",
+                        speed: "5.1 MB/s"
+                    }
+                ];
+            }
+
+            initializeLibrary() {
+                this.displayLibraryItems(this.libraryItems);
+            }
+
+            setupEventListeners() {
+                document.getElementById('filterSelect').addEventListener('change', (e) => {
+                    this.filterLibrary(e.target.value);
+                });
+
+                document.getElementById('sortLibrarySelect').addEventListener('change', (e) => {
+                    this.sortLibrary(e.target.value);
+                });
+            }
+
+            displayLibraryItems(items) {
+                const container = document.getElementById('libraryContent');
+                const emptyState = document.getElementById('emptyLibrary');
+
+                if (items.length === 0) {
+                    container.innerHTML = '';
+                    emptyState.classList.remove('hidden');
+                    return;
+                }
+
+                emptyState.classList.add('hidden');
+                container.innerHTML = '';
+
+                items.forEach((item, index) => {
+                    const itemElement = this.createLibraryItem(item, index);
+                    container.appendChild(itemElement);
+                });
+            }
+
+            createLibraryItem(item, index) {
+                const card = document.createElement('div');
+                card.className = 'media-card bg-slate-800/50 backdrop-blur-sm rounded-xl overflow-hidden border border-slate-700 hover:border-slate-600 transition-all cursor-pointer fade-in';
+                card.style.animationDelay = `${index * 0.1}s`;
+
+                const typeIcons = {
+                    movie: 'fas fa-film',
+                    tv: 'fas fa-tv',
+                    music: 'fas fa-music',
+                    software: 'fas fa-desktop',
+                    game: 'fas fa-gamepad'
+                };
+
+                const typeColors = {
+                    movie: 'bg-blue-600',
+                    tv: 'bg-green-600',
+                    music: 'bg-purple-600',
+                    software: 'bg-yellow-600',
+                    game: 'bg-red-600'
+                };
+
+                card.innerHTML = `
+                    <div class="relative">
+                        <img src="${item.thumbnail}" alt="${item.name}" class="w-full h-48 object-cover" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgdmlld0JveD0iMCAwIDIwMCAyMDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxyZWN0IHdpZHRoPSIyMDAiIGhlaWdodD0iMjAwIiBmaWxsPSIjMzM0MTU1Ii8+CjxwYXRoIGQ9Ik0xMDAgNzBDMTA4LjI4NCA3MCA5NS4wMzU3IDc3LjE2NDMgOTUuMDM1NyA4NS40NDg3VjExNC41NTFDOTUuMDM1NyAxMjIuODM2IDEwOC4yODQgMTMwIDEwMCAxMzBDOTEuNzE1NyAxMzAgODQuNTUxMyAxMjIuODM2IDg0LjU1MTMgMTE0LjU1MVY4NS40NDg3Qzg0LjU1MTMgNzcuMTY0MyA5MS43MTU3IDcwIDEwMCA3MFoiIGZpbGw9IiM2QjczODBCIi8+Cjwvc3ZnPgo='">
+                        <div class="absolute top-2 right-2">
+                            <span class="text-xs ${typeColors[item.type]} px-2 py-1 rounded-full flex items-center space-x-1">
+                                <i class="${typeIcons[item.type]} text-xs"></i>
+                                <span>${item.type.charAt(0).toUpperCase() + item.type.slice(1)}</span>
+                            </span>
+                        </div>
+                        ${item.status === 'downloading' ? `
+                            <div class="absolute bottom-2 left-2 right-2">
+                                <div class="bg-black/70 rounded-lg p-2">
+                                    <div class="flex items-center justify-between text-xs mb-1">
+                                        <span class="text-white">${item.progress}%</span>
+                                        <span class="text-blue-400">${item.speed}</span>
+                                    </div>
+                                    <div class="w-full bg-slate-600 rounded-full h-1">
+                                        <div class="bg-blue-500 h-1 rounded-full transition-all" style="width: ${item.progress}%"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        ` : ''}
+                    </div>
+                    
+                    <div class="p-4">
+                        <h3 class="font-semibold text-white mb-2 truncate">${item.name}</h3>
+                        
+                        <div class="flex items-center justify-between text-sm text-slate-400 mb-3">
+                            <span>${item.size}</span>
+                            <span>${item.quality || item.version || ''}</span>
+                        </div>
+                        
+                        ${item.type === 'movie' ? `
+                            <div class="text-xs text-slate-400 mb-3">
+                                <span>Duración: ${item.duration}</span>
+                            </div>
+                        ` : ''}
+                        
+                        ${item.type === 'tv' ? `
+                            <div class="text-xs text-slate-400 mb-3">
+                                <span>${item.episodes} episodios</span>
+                            </div>
+                        ` : ''}
+                        
+                        ${item.type === 'music' ? `
+                            <div class="text-xs text-slate-400 mb-3">
+                                <span>${item.artist}</span> • <span>${item.tracks} tracks</span>
+                            </div>
+                        ` : ''}
+                        
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs text-slate-500">${this.formatDate(item.downloadDate)}</span>
+                            <div class="flex items-center space-x-2">
+                                ${item.status === 'completed' ? `
+                                    <button onclick="playItem(${item.id})" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-xs transition-colors">
+                                        <i class="fas fa-play mr-1"></i>
+                                        Reproducir
+                                    </button>
+                                ` : `
+                                    <button onclick="pauseDownload(${item.id})" class="bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1 rounded text-xs transition-colors">
+                                        <i class="fas fa-pause mr-1"></i>
+                                        Pausar
+                                    </button>
+                                `}
+                                <button onclick="removeItem(${item.id})" class="text-red-400 hover:text-red-300 transition-colors">
+                                    <i class="fas fa-trash text-xs"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                return card;
+            }
+
+            filterLibrary(filter) {
+                let filteredItems = this.libraryItems;
+
+                if (filter !== 'all') {
+                    if (filter === 'completed' || filter === 'downloading') {
+                        filteredItems = this.libraryItems.filter(item => item.status === filter);
+                    } else {
+                        filteredItems = this.libraryItems.filter(item => item.category === filter);
+                    }
+                }
+
+                this.displayLibraryItems(filteredItems);
+            }
+
+            sortLibrary(sortBy) {
+                let sortedItems = [...this.libraryItems];
+
+                switch (sortBy) {
+                    case 'name':
+                        sortedItems.sort((a, b) => a.name.localeCompare(b.name));
+                        break;
+                    case 'size':
+                        sortedItems.sort((a, b) => this.parseSize(b.size) - this.parseSize(a.size));
+                        break;
+                    case 'progress':
+                        sortedItems.sort((a, b) => b.progress - a.progress);
+                        break;
+                    case 'date':
+                    default:
+                        sortedItems.sort((a, b) => new Date(b.downloadDate) - new Date(a.downloadDate));
+                        break;
+                }
+
+                this.displayLibraryItems(sortedItems);
+            }
+
+            formatDate(dateString) {
+                const date = new Date(dateString);
+                return date.toLocaleDateString('es-ES', { 
+                    day: 'numeric', 
+                    month: 'short',
+                    year: 'numeric'
+                });
+            }
+
+            parseSize(sizeStr) {
+                const units = { 'GB': 1024, 'MB': 1, 'KB': 1/1024 };
+                const match = sizeStr.match(/([\d.]+)\s*(GB|MB|KB)/);
+                if (match) {
+                    const [, size, unit] = match;
+                    return parseFloat(size) * (units[unit] || 1);
+                }
+                return 0;
+            }
+        }
+
+        // Global functions for library actions
+        function playItem(itemId) {
+            console.log('Playing item:', itemId);
+            // In a real implementation, this would open the player
+            alert('Reproduciendo contenido...');
+        }
+
+        function pauseDownload(itemId) {
+            console.log('Pausing download:', itemId);
+            alert('Descarga pausada');
+        }
+
+        function removeItem(itemId) {
+            if (confirm('¿Estás seguro de que quieres eliminar este elemento?')) {
+                console.log('Removing item:', itemId);
+                // In a real implementation, this would remove the item
+                location.reload();
+            }
+        }
+
+        // Initialize library
+        document.addEventListener('DOMContentLoaded', () => {
+            new LibraryManager();
+        });
+    </script>
+</body>
+</html>

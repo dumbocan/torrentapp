@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  torrentstream:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./downloads:/app/downloads
+      - ./config:/app/config
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - MAX_DOWNLOADS=5
+    restart: unless-stopped
+    networks:
+      - torrentstream-network
+
+  # Redis for caching (future use)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    networks:
+      - torrentstream-network
+
+  # Database (future use)
+  database:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: torrentstream
+      POSTGRES_USER: torrentstream
+      POSTGRES_PASSWORD: your_password_here
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - torrentstream-network
+
+volumes:
+  redis-data:
+  postgres-data:
+
+networks:
+  torrentstream-network:
+    driver: bridge
