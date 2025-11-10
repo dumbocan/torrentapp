@@ -6,7 +6,98 @@ class TorrentStream {
         this.activeDownloads = new Map();
         this.videoPlayer = document.getElementById('videoPlayer');
         this.playerPlaceholder = document.getElementById('playerPlaceholder');
+        this.webRtcTrackers = [
+            'wss://tracker.openwebtorrent.com',
+            'wss://tracker.btorrent.xyz',
+            'wss://tracker.files.fm:7073/announce',
+            'wss://tracker.webtorrent.dev'
+        ];
+        this.torrentStatusTimers = new Map();
+        this.currentBackendTorrentId = null;
         this.initializeApp();
+    }
+
+    async startBackendTorrent(magnetURI) {
+        const response = await fetch('/api/stream', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ magnet: magnetURI })
+        });
+
+        if (!response.ok) {
+            throw new Error('No se pudo iniciar el torrent en el servidor');
+        }
+
+        return response.json();
+    }
+
+    monitorTorrentStatus(torrentId, displayName) {
+        const encodedId = encodeURIComponent(torrentId);
+
+        const poll = async () => {
+            try {
+                const response = await fetch(`/api/torrent/${encodedId}/status`);
+                if (!response.ok) {
+                    throw new Error('Estado no disponible');
+                }
+
+                const status = await response.json();
+                this.updateProgressFromBackend(status);
+
+                if (status.ready && status.files && status.files.length) {
+                    const fileIndex = typeof status.streamableFileIndex === 'number'
+                        ? status.streamableFileIndex
+                        : (status.files.find(file => file.isAudio)?.index ?? status.files[0].index);
+
+                    this.streamFromBackend(torrentId, fileIndex, displayName || status.name, status.files[fileIndex]);
+                    return;
+                }
+
+                const handle = setTimeout(poll, 1500);
+                this.torrentStatusTimers.set(torrentId, handle);
+            } catch (error) {
+                console.error('Error monitorizando torrent:', error);
+                this.showError('No se pudo iniciar la reproducción desde el servidor');
+                this.showLoading(false);
+            }
+        };
+
+        poll();
+    }
+
+    streamFromBackend(torrentId, fileIndex, displayName = '', fileMeta = null) {
+        this.stopMonitoringTorrent(torrentId);
+        this.playerPlaceholder.style.display = 'none';
+        this.videoPlayer.style.display = 'block';
+
+        if (displayName) {
+            const titleElement = document.getElementById('playerTitle');
+            if (titleElement) {
+                titleElement.textContent = displayName;
+            }
+        }
+
+        const videoSrc = `/api/stream/${encodeURIComponent(torrentId)}/${fileIndex}`;
+        this.videoPlayer.src = videoSrc;
+        this.videoPlayer.load();
+
+        const autoplay = () => {
+            this.videoPlayer.play().catch(() => {
+                console.warn('Autoplay bloqueado por el navegador');
+            });
+        };
+
+        this.videoPlayer.addEventListener('loadeddata', autoplay, { once: true });
+        this.showLoading(false);
+    }
+
+    stopMonitoringTorrent(torrentId) {
+        if (this.torrentStatusTimers.has(torrentId)) {
+            clearTimeout(this.torrentStatusTimers.get(torrentId));
+            this.torrentStatusTimers.delete(torrentId);
+        }
     }
 
     initializeApp() {
@@ -38,6 +129,9 @@ class TorrentStream {
 
     initializeWebTorrent() {
         try {
+            if (!WebTorrent.WEBRTC_SUPPORT) {
+                throw new Error('Este navegador no soporta WebRTC');
+            }
             // Initialize WebTorrent client
             this.client = new WebTorrent();
             console.log('WebTorrent client initialized successfully');
@@ -78,26 +172,18 @@ class TorrentStream {
             }
             
             const results = await response.json();
-            
-            // Transform results to match our format
-            return results.map((result, index) => ({
-                name: result.name,
-                size: result.size,
-                seeds: result.seeds,
-                leechs: result.leechs,
-                category: result.category,
-                quality: result.quality,
-                description: result.description || `Película ${result.name}`,
-                magnet: result.magnet,
-                cover: result.cover,
-                rating: result.rating,
-                year: result.year,
-                torrents: result.torrents
+            return results.map((result) => ({
+                ...result,
+                leechs: result.leechs ?? result.peers ?? 0,
+                category: result.category || 'music',
+                quality: result.quality || 'Audio',
+                description: result.description || this.buildDescriptionFromFiles(result.files),
+                files: result.files || []
             }));
         } catch (error) {
             console.error('Search error:', error);
-            // Fallback to mock data if API fails
-            return this.getMockResults(query);
+            this.showError('No se pudo obtener resultados en este momento');
+            return [];
         }
     }
 
@@ -132,6 +218,12 @@ class TorrentStream {
         
         // Clear previous results
         torrentResults.innerHTML = '';
+
+        if (!results.length) {
+            resultsSection.classList.remove('hidden');
+            torrentResults.innerHTML = '<p class="text-slate-400 text-center py-10">No se encontraron torrents que coincidan con tu búsqueda.</p>';
+            return;
+        }
         
         // Apply filters and sorting
         const sortBy = document.getElementById('sortSelect').value;
@@ -140,7 +232,7 @@ class TorrentStream {
 
         let filteredResults = results.filter(torrent => {
             if (category !== 'all' && torrent.category !== category) return false;
-            if (torrent.seeds < minQuality) return false;
+            if ((torrent.seeds || 0) < minQuality) return false;
             return true;
         });
 
@@ -155,11 +247,14 @@ class TorrentStream {
             }
         });
 
-        // Display results
-        filteredResults.forEach((torrent, index) => {
-            const torrentCard = this.createTorrentCard(torrent, index);
-            torrentResults.appendChild(torrentCard);
-        });
+        if (!filteredResults.length) {
+            torrentResults.innerHTML = '<p class="text-slate-400 text-center py-10">No hay resultados en esta categoría con los filtros aplicados.</p>';
+        } else {
+            filteredResults.forEach((torrent, index) => {
+                const torrentCard = this.createTorrentCard(torrent, index);
+                torrentResults.appendChild(torrentCard);
+            });
+        }
 
         resultsSection.classList.remove('hidden');
         resultsSection.scrollIntoView({ behavior: 'smooth' });
@@ -188,6 +283,13 @@ class TorrentStream {
             books: 'Libros'
         };
 
+        const description = torrent.description || this.buildDescriptionFromFiles(torrent.files);
+        const seeds = Number(torrent.seeds) || 0;
+        const leechs = Number(torrent.leechs) || 0;
+        const safeName = this.escapeHtml(torrent.name || 'Audio sin título');
+        const safeDescription = this.escapeHtml(description || 'Contenido de audio');
+        const safeSize = this.escapeHtml(torrent.size || 'Tamaño desconocido');
+
         card.innerHTML = `
             <div class="flex items-start justify-between mb-4">
                 <div class="flex-1">
@@ -195,15 +297,15 @@ class TorrentStream {
                         <span class="text-xs ${categoryColors[torrent.category] || 'bg-gray-600'} px-2 py-1 rounded-full">
                             ${categoryNames[torrent.category] || 'Otro'}
                         </span>
-                        <span class="text-xs bg-slate-600 px-2 py-1 rounded-full">${torrent.quality}</span>
+                        <span class="text-xs bg-slate-600 px-2 py-1 rounded-full">${this.escapeHtml(torrent.quality || 'Audio')}</span>
                     </div>
                     <h4 class="font-semibold text-lg mb-2 text-white hover:text-blue-400 transition-colors">
-                        ${torrent.name}
+                        ${safeName}
                     </h4>
-                    <p class="text-sm text-slate-400 mb-3">${torrent.description}</p>
+                    <p class="text-sm text-slate-400 mb-3">${safeDescription}</p>
                 </div>
                 <div class="text-right ml-4">
-                    <div class="text-lg font-bold text-white">${torrent.size}</div>
+                    <div class="text-lg font-bold text-white">${safeSize}</div>
                 </div>
             </div>
             
@@ -211,20 +313,20 @@ class TorrentStream {
                 <div class="flex items-center space-x-4">
                     <div class="flex items-center space-x-1">
                         <i class="fas fa-arrow-up seed text-xs"></i>
-                        <span class="seed text-sm font-medium">${torrent.seeds}</span>
+                        <span class="seed text-sm font-medium">${seeds}</span>
                     </div>
                     <div class="flex items-center space-x-1">
                         <i class="fas fa-arrow-down leech text-xs"></i>
-                        <span class="leech text-sm font-medium">${torrent.leechs}</span>
+                        <span class="leech text-sm font-medium">${leechs}</span>
                     </div>
                 </div>
                 <div class="flex items-center space-x-2">
-                    <button onclick="torrentStream.playTorrent('${torrent.magnet}', '${torrent.name}')" 
+                    <button data-action="play"
                             class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2">
                         <i class="fas fa-play text-xs"></i>
                         <span>Reproducir</span>
                     </button>
-                    <button onclick="torrentStream.downloadTorrent('${torrent.magnet}', '${torrent.name}')" 
+                    <button data-action="download"
                             class="bg-slate-600 hover:bg-slate-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2">
                         <i class="fas fa-download text-xs"></i>
                         <span>Descargar</span>
@@ -233,163 +335,130 @@ class TorrentStream {
             </div>
         `;
 
+        const playButton = card.querySelector('[data-action="play"]');
+        const downloadButton = card.querySelector('[data-action="download"]');
+
+        if (playButton) {
+            if (!torrent.magnet) {
+                playButton.disabled = true;
+                playButton.classList.add('opacity-50', 'cursor-not-allowed');
+            } else {
+                playButton.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    this.playTorrent(torrent.magnet, torrent.name);
+                });
+            }
+        }
+
+        if (downloadButton) {
+            if (!torrent.magnet) {
+                downloadButton.disabled = true;
+                downloadButton.classList.add('opacity-50', 'cursor-not-allowed');
+            } else {
+                downloadButton.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    this.downloadTorrent(torrent.magnet, torrent.name);
+                });
+            }
+        }
+
         return card;
     }
 
     async playTorrent(magnetURI, name) {
+        if (!magnetURI) {
+            this.showError('No se encontró un enlace magnet válido para este torrent');
+            return;
+        }
+
         try {
             this.showPlayer();
             this.showLoading(true);
-            
-            // Generate a unique ID for this torrent
-            const torrentId = this.generateTorrentId(magnetURI);
-            
-            // Add torrent to backend for streaming
-            const response = await fetch('/api/stream', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    magnetURI: magnetURI,
-                    id: torrentId
-                })
-            });
-
-            if (!response.ok) {
-                throw new Error('Failed to add torrent for streaming');
-            }
-
-            const result = await response.json();
-            console.log('Torrent added for streaming:', result);
-            
-            // Start monitoring the torrent status
-            this.monitorTorrentStatus(torrentId, name);
-
+            const torrentInfo = await this.startBackendTorrent(magnetURI);
+            this.currentBackendTorrentId = torrentInfo.torrentId;
+            this.monitorTorrentStatus(torrentInfo.torrentId, name);
         } catch (error) {
             console.error('Error playing torrent:', error);
             this.showError('Error al reproducir el torrent');
             this.showLoading(false);
             
             // Fallback to client-side streaming
-            this.playTorrentClientSide(magnetURI, name);
-        }
-    }
-
-    async playTorrentClientSide(magnetURI, name) {
-        try {
-            if (this.currentTorrent) {
-                this.currentTorrent.destroy();
-            }
-
-            // Add torrent to client
-            this.client.add(magnetURI, (torrent) => {
-                this.currentTorrent = torrent;
-                this.setupTorrentEvents(torrent, name);
-                this.findAndPlayVideoFile(torrent);
-            });
-        } catch (error) {
-            console.error('Client-side streaming error:', error);
-            this.showError('Error al reproducir el torrent');
-            this.showLoading(false);
-        }
-    }
-
-    generateTorrentId(magnetURI) {
-        // Create a simple hash from the magnet URI
-        let hash = 0;
-        for (let i = 0; i < magnetURI.length; i++) {
-            const char = magnetURI.charCodeAt(i);
-            hash = ((hash << 5) - hash) + char;
-            hash = hash & hash; // Convert to 32bit integer
-        }
-        return Math.abs(hash).toString(36);
-    }
-
-    async monitorTorrentStatus(torrentId, name) {
-        const checkStatus = async () => {
             try {
-                const response = await fetch(`/api/torrent/${torrentId}`);
-                if (!response.ok) {
-                    throw new Error('Failed to get torrent status');
-                }
-
-                const torrentData = await response.json();
-                
-                if (torrentData.status === 'ready' && torrentData.files.length > 0) {
-                    // Find the largest video file
-                    const videoFiles = torrentData.files.filter(file => file.type === 'video');
-                    if (videoFiles.length > 0) {
-                        const largestVideo = videoFiles.reduce((prev, current) => 
-                            (prev.length > current.length) ? prev : current
-                        );
-                        
-                        // Stream from backend
-                        this.streamFromBackend(torrentId, torrentData.files.indexOf(largestVideo));
-                        return; // Stop monitoring
-                    }
-                }
-
-                // Update progress
-                this.updateProgressFromBackend(torrentData);
-                
-                // Continue monitoring
-                setTimeout(checkStatus, 1000);
-                
-            } catch (error) {
-                console.error('Error monitoring torrent status:', error);
-                this.showLoading(false);
+                await this.playTorrentClientSide(magnetURI, name);
+            } catch (fallbackError) {
+                console.error('Client-side fallback failed:', fallbackError);
             }
-        };
-
-        checkStatus();
+        }
     }
 
-    streamFromBackend(torrentId, fileIndex) {
-        const videoSrc = `/api/stream/${torrentId}/${fileIndex}`;
-        this.videoPlayer.src = videoSrc;
-        this.playerPlaceholder.style.display = 'none';
-        this.videoPlayer.style.display = 'block';
-        this.showLoading(false);
-        
-        // Auto-play the video
-        this.videoPlayer.addEventListener('loadedmetadata', () => {
-            this.videoPlayer.play();
-        }, { once: true });
-    }
-
-    updateProgressFromBackend(torrentData) {
-        const progress = Math.round(torrentData.progress * 100);
-        document.getElementById('progressBar').style.width = `${progress}%`;
-        document.getElementById('progressPercent').textContent = `${progress}%`;
-        
-        const downloadSpeed = (torrentData.downloadSpeed / 1024 / 1024).toFixed(2);
-        const uploadSpeed = (torrentData.uploadSpeed / 1024 / 1024).toFixed(2);
-        
-        document.getElementById('downloadSpeed').textContent = `${downloadSpeed} MB/s`;
-        document.getElementById('uploadSpeed').textContent = `${uploadSpeed} MB/s`;
-    }
-
-    async downloadTorrent(magnetURI, name) {
-        try {
-            if (this.activeDownloads.has(magnetURI)) {
-                this.showError('Este torrent ya está en descarga');
+    playTorrentClientSide(magnetURI, name) {
+        return new Promise((resolve, reject) => {
+            if (!this.client) {
+                reject(new Error('Cliente WebTorrent no inicializado'));
                 return;
             }
 
-            this.client.add(magnetURI, (torrent) => {
-                this.activeDownloads.set(magnetURI, { torrent, name, status: 'downloading' });
-                this.updateDownloadsList();
-                this.setupDownloadEvents(torrent, name);
-            });
+            const startPlayback = (torrent) => {
+                if (this.currentTorrent && this.currentTorrent !== torrent && !this.isTorrentInDownloads(this.currentTorrent)) {
+                    this.currentTorrent.destroy();
+                }
 
-        } catch (error) {
-            console.error('Error downloading torrent:', error);
-            this.showError('Error al descargar el torrent');
-        }
+                this.currentTorrent = torrent;
+                this.setupTorrentEvents(torrent, name);
+
+                if (torrent.ready) {
+                    this.findAndPlayMediaFile(torrent, name);
+                } else {
+                    torrent.once('ready', () => this.findAndPlayMediaFile(torrent, name));
+                }
+
+                resolve();
+            };
+
+            const existingTorrent = this.client.get(magnetURI);
+            if (existingTorrent) {
+                if (existingTorrent.ready) {
+                    startPlayback(existingTorrent);
+                } else {
+                    existingTorrent.once('ready', () => startPlayback(existingTorrent));
+                }
+                return;
+            }
+
+            if (this.currentTorrent && !this.isTorrentInDownloads(this.currentTorrent)) {
+                this.currentTorrent.destroy();
+                this.currentTorrent = null;
+            }
+
+            let torrentInstance;
+            try {
+                torrentInstance = this.client.add(magnetURI, this.getTorrentOptions());
+            } catch (error) {
+                reject(error);
+                return;
+            }
+
+            const onError = (error) => {
+                torrentInstance.removeListener('ready', onReady);
+                reject(error);
+            };
+
+            const onReady = () => {
+                torrentInstance.removeListener('error', onError);
+                startPlayback(torrentInstance);
+            };
+
+            torrentInstance.once('error', onError);
+            torrentInstance.once('ready', onReady);
+        });
     }
 
     setupTorrentEvents(torrent, name) {
+        if (torrent.__streamEventsAttached) {
+            return;
+        }
+        torrent.__streamEventsAttached = true;
+
         torrent.on('download', () => {
             this.updateProgress(torrent);
             this.updateSpeeds(torrent);
@@ -407,49 +476,147 @@ class TorrentStream {
         });
     }
 
-    setupDownloadEvents(torrent, name) {
-        torrent.on('download', () => {
+    async downloadTorrent(magnetURI, name) {
+        try {
+            if (!magnetURI) {
+                this.showError('No se puede descargar sin enlace magnet');
+                return;
+            }
+
+            const torrentInfo = await this.startBackendTorrent(magnetURI);
+            const torrentId = torrentInfo.torrentId;
+
+            if (this.activeDownloads.has(torrentId)) {
+                this.showError('Este torrent ya está en descarga');
+                return;
+            }
+
+            this.activeDownloads.set(torrentId, {
+                torrentId,
+                name: name || torrentInfo.name || 'Descarga sin título',
+                status: 'downloading',
+                progress: 0,
+                downloadSpeed: 0,
+                downloadUrl: null,
+                fileName: null
+            });
+
             this.updateDownloadsList();
+            this.pollDownloadStatus(torrentId);
+
+        } catch (error) {
+            console.error('Error downloading torrent:', error);
+            this.showError('Error al descargar el torrent');
+        }
+    }
+
+    findAndPlayMediaFile(torrent, displayName = '') {
+        if (!torrent.files || !torrent.files.length) {
+            this.showError('El torrent no contiene archivos reproducibles');
+            this.showLoading(false);
+            return;
+        }
+
+        const audioExtensions = ['mp3', 'flac', 'aac', 'm4a', 'wav', 'ogg', 'opus'];
+        const videoExtensions = ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'webm'];
+
+        const audioFiles = torrent.files.filter(file => audioExtensions.includes(this.getFileExtension(file.name)));
+        const videoFiles = torrent.files.filter(file => videoExtensions.includes(this.getFileExtension(file.name)));
+        const preferredFiles = audioFiles.length ? audioFiles : videoFiles;
+
+        if (!preferredFiles.length) {
+            this.showError('No se encontraron archivos de audio compatibles en este torrent');
+            this.showLoading(false);
+            return;
+        }
+
+        const selectedFile = preferredFiles.reduce((prev, current) => (current.length > prev.length ? current : prev));
+        this.playerPlaceholder.style.display = 'none';
+        this.videoPlayer.style.display = 'block';
+        this.videoPlayer.removeAttribute('src');
+        this.videoPlayer.load();
+
+        selectedFile.renderTo(this.videoPlayer, { autoplay: true }, (error) => {
+            if (error) {
+                console.error('Render error:', error);
+                this.showError('No se pudo iniciar la reproducción');
+            }
+            this.showLoading(false);
         });
 
-        torrent.on('done', () => {
-            const download = this.activeDownloads.get(torrent.magnetURI);
-            if (download) {
-                download.status = 'completed';
-                this.activeDownloads.set(torrent.magnetURI, download);
-                this.updateDownloadsList();
-            }
+        const titleElement = document.getElementById('playerTitle');
+        if (titleElement) {
+            titleElement.textContent = displayName || selectedFile.name;
+        }
+
+        this.videoPlayer.play().catch(() => {
+            // Ignorar autoplay bloqueado; usuario puede presionar play manualmente
         });
     }
 
-    findAndPlayVideoFile(torrent) {
-        // Find the largest video file in the torrent
-        const videoFiles = torrent.files.filter(file => {
-            const ext = file.name.split('.').pop().toLowerCase();
-            return ['mp4', 'mkv', 'avi', 'mov', 'wmv'].includes(ext);
-        });
+    pollDownloadStatus(torrentId) {
+        const pollKey = `download-${torrentId}`;
+        const encodedId = encodeURIComponent(torrentId);
 
-        if (videoFiles.length > 0) {
-            // Play the largest video file
-            const largestVideo = videoFiles.reduce((prev, current) => 
-                (prev.length > current.length) ? prev : current
-            );
+        const poll = async () => {
+            try {
+                const response = await fetch(`/api/torrent/${encodedId}/status`);
+                if (!response.ok) {
+                    throw new Error('Estado de descarga no disponible');
+                }
 
-            // Create a stream URL
-            largestVideo.renderTo(this.videoPlayer, { autoplay: true });
-            this.playerPlaceholder.style.display = 'none';
-            this.videoPlayer.style.display = 'block';
-            
-        } else {
-            this.showError('No se encontraron archivos de video en el torrent');
-            this.showLoading(false);
-        }
+                const status = await response.json();
+                const download = this.activeDownloads.get(torrentId);
+                if (!download) {
+                    return;
+                }
+
+                download.progress = Math.round((status.progress || 0) * 100);
+                download.downloadSpeed = status.downloadSpeed || 0;
+                download.status = status.done ? 'completed' : 'downloading';
+
+                if (status.files && status.files.length) {
+                    const fileMeta = status.files.find(file => file.isAudio) || status.files[0];
+                    if (fileMeta) {
+                        download.downloadUrl = fileMeta.downloadUrl;
+                        download.fileName = fileMeta.name;
+                    }
+                }
+
+                this.activeDownloads.set(torrentId, download);
+                this.updateDownloadsList();
+
+                if (!status.done) {
+                    const handle = setTimeout(poll, 2000);
+                    this.torrentStatusTimers.set(pollKey, handle);
+                } else {
+                    this.torrentStatusTimers.delete(pollKey);
+                }
+            } catch (error) {
+                console.error('Error actualizando descarga:', error);
+                this.torrentStatusTimers.delete(pollKey);
+            }
+        };
+
+        poll();
     }
 
     updateProgress(torrent) {
         const progress = Math.round(torrent.progress * 100);
         document.getElementById('progressBar').style.width = `${progress}%`;
         document.getElementById('progressPercent').textContent = `${progress}%`;
+    }
+
+    updateProgressFromBackend(status) {
+        const progressPercent = Math.round((status.progress || 0) * 100);
+        document.getElementById('progressBar').style.width = `${progressPercent}%`;
+        document.getElementById('progressPercent').textContent = `${progressPercent}%`;
+
+        const downloadSpeed = this.formatSpeed(status.downloadSpeed || 0);
+        const uploadSpeed = this.formatSpeed(status.uploadSpeed || 0);
+
+        document.getElementById('downloadSpeed').textContent = downloadSpeed;
+        document.getElementById('uploadSpeed').textContent = uploadSpeed;
     }
 
     updateSpeeds(torrent) {
@@ -487,11 +654,10 @@ class TorrentStream {
             return;
         }
 
-        this.activeDownloads.forEach((download, magnetURI) => {
-            const { torrent, name, status } = download;
-            const progress = Math.round(torrent.progress * 100);
-            const downloadSpeed = (torrent.downloadSpeed / 1024 / 1024).toFixed(2);
-            
+        this.activeDownloads.forEach((download, torrentId) => {
+            const { name, status, progress = 0, downloadSpeed = 0, downloadUrl } = download;
+            const speedFormatted = this.formatSpeed(downloadSpeed);
+
             const downloadElement = document.createElement('div');
             downloadElement.className = 'bg-slate-800/50 backdrop-blur-sm rounded-xl p-4 border border-slate-700';
             downloadElement.innerHTML = `
@@ -504,12 +670,20 @@ class TorrentStream {
                 <div class="flex items-center justify-between text-sm">
                     <div class="flex items-center space-x-4">
                         <span class="text-slate-400">Progreso: ${progress}%</span>
-                        <span class="download-speed">${downloadSpeed} MB/s</span>
+                        <span class="download-speed">${speedFormatted}</span>
                     </div>
-                    <button onclick="torrentStream.removeDownload('${magnetURI}')" 
-                            class="text-red-400 hover:text-red-300 transition-colors">
-                        <i class="fas fa-times text-sm"></i>
-                    </button>
+                    <div class="flex items-center space-x-3">
+                        ${downloadUrl && status === 'completed'
+                            ? `<a href="${downloadUrl}" target="_blank" class="text-green-400 hover:text-green-200 transition-colors">
+                                    <i class="fas fa-download text-sm"></i>
+                               </a>`
+                            : ''
+                        }
+                        <button onclick="torrentStream.removeDownload('${torrentId}')" 
+                                class="text-red-400 hover:text-red-300 transition-colors">
+                            <i class="fas fa-times text-sm"></i>
+                        </button>
+                    </div>
                 </div>
                 <div class="w-full bg-slate-700 rounded-full h-2 mt-2">
                     <div class="bg-blue-600 h-2 rounded-full transition-all" style="width: ${progress}%"></div>
@@ -520,12 +694,13 @@ class TorrentStream {
         });
     }
 
-    removeDownload(magnetURI) {
-        const download = this.activeDownloads.get(magnetURI);
+    removeDownload(torrentId) {
+        const download = this.activeDownloads.get(torrentId);
         if (download) {
-            download.torrent.destroy();
-            this.activeDownloads.delete(magnetURI);
+            this.stopMonitoringTorrent(`download-${torrentId}`);
+            this.activeDownloads.delete(torrentId);
             this.updateDownloadsList();
+            fetch(`/api/torrent/${encodeURIComponent(torrentId)}`, { method: 'DELETE' }).catch(() => {});
         }
     }
 
@@ -546,6 +721,10 @@ class TorrentStream {
 
     closePlayer() {
         document.getElementById('playerSection').classList.add('hidden');
+        if (this.currentBackendTorrentId) {
+            this.stopMonitoringTorrent(this.currentBackendTorrentId);
+            this.currentBackendTorrentId = null;
+        }
         if (this.currentTorrent) {
             this.currentTorrent.destroy();
             this.currentTorrent = null;
@@ -590,6 +769,48 @@ class TorrentStream {
         }
     }
 
+    buildDescriptionFromFiles(files = []) {
+        if (!files || !files.length) {
+            return '';
+        }
+        const preview = files.slice(0, 3).map(file => file.name).filter(Boolean);
+        if (!preview.length) {
+            return '';
+        }
+        const remaining = files.length - preview.length;
+        return `Incluye: ${preview.join(', ')}${remaining > 0 ? ` y ${remaining} más` : ''}`;
+    }
+
+    escapeHtml(value = '') {
+        return value
+            .toString()
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    getFileExtension(filename = '') {
+        const parts = filename.toLowerCase().split('.');
+        return parts.length > 1 ? parts.pop() : '';
+    }
+
+    getTorrentOptions() {
+        return {
+            announce: [...this.webRtcTrackers]
+        };
+    }
+
+    isTorrentInDownloads(torrent) {
+        for (const download of this.activeDownloads.values()) {
+            if (download.torrent && download.torrent === torrent) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     parseSize(sizeStr) {
         const units = { 'GB': 1024, 'MB': 1, 'KB': 1/1024 };
         const match = sizeStr.match(/([\d.]+)\s*(GB|MB|KB)/);
@@ -598,6 +819,11 @@ class TorrentStream {
             return parseFloat(size) * (units[unit] || 1);
         }
         return 0;
+    }
+
+    formatSpeed(bytesPerSecond) {
+        if (!bytesPerSecond) return '0 MB/s';
+        return `${(bytesPerSecond / 1024 / 1024).toFixed(2)} MB/s`;
     }
 
     loadPopularTorrents() {

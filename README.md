@@ -1,6 +1,6 @@
 # 🎬 TorrentStream
 
-Una aplicación web completa para buscar, reproducir y descargar torrents con streaming en tiempo real.
+Una aplicación web completa para buscar, reproducir y descargar torrents de musica .mp3 con streaming en tiempo real.
 
 ## ✨ Características
 
@@ -9,7 +9,6 @@ Una aplicación web completa para buscar, reproducir y descargar torrents con st
 - 🎥 **Streaming en tiempo real** - Reproduce mientras descargas
 - 📥 **Gestión de descargas** - Cola, pausa, reanuda descargas
 - 📚 **Biblioteca personal** - Gestiona tu contenido descargado
-- 🎵 **Soporte multimedia** - Video, audio y otros formatos
 - ⚙️ **Configuración avanzada** - Personaliza tu experiencia
 
 ### Técnicas
