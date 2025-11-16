@@ -50,6 +50,29 @@ cp .env.example .env
 mkdir downloads
 ```
 
+### Método 3: Docker o Docker Compose
+```bash
+# Build de la imagen
+docker build -t torrentstream .
+
+# Ejecutar el contenedor con los volúmenes locales
+docker run -it --rm \
+  -p 3000:3000 \
+  -v "$(pwd)/downloads:/app/downloads" \
+  -v "$(pwd)/config:/app/config" \
+  -e NODE_ENV=production \
+  -e PORT=3000 \
+  -e MAX_DOWNLOADS=5 \
+  torrentstream
+```
+
+Para levantar todo el stack definido en `docker-compose.yml` (app + servicios futuros):
+```bash
+docker compose up --build
+```
+
+Esto expone la app en `http://localhost:3000` y persistirá las descargas en `./downloads`.
+
 ## 📋 Uso
 
 ### Iniciar el Servidor
