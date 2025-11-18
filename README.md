@@ -5,10 +5,12 @@ Una aplicación web completa para buscar, reproducir y descargar torrents de mus
 ## ✨ Características
 
 ### Funcionalidades Principales
-- 🔍 **Búsqueda de torrents** - Integración con APIs reales (YTS, etc.)
-- 🎥 **Streaming en tiempo real** - Reproduce mientras descargas
+- 🔍 **Búsqueda de torrents** - Integra resultados de The Pirate Bay, LimeTorrents, TorrentDownload, Torlock y 1337x
+- 🎧 **Reproductor compacto** - Muestra carátula, metadatos y controles para audio con soporte de streaming
 - 📥 **Gestión de descargas** - Cola, pausa, reanuda descargas
 - 📚 **Biblioteca personal** - Gestiona tu contenido descargado
+- 🗂️ **Biblioteca inteligente** - Indexa tus MP3/FLAC locales y los prioriza en las búsquedas
+- ▶️ **Cola de reproducción** - Añade pistas o álbumes a una cola y deja que el reproductor las ejecute en secuencia
 - ⚙️ **Configuración avanzada** - Personaliza tu experiencia
 
 ### Técnicas
@@ -117,6 +119,13 @@ DOWNLOAD_PATH=./downloads
 GET /api/search?query=termino&category=movies&limit=20
 ```
 
+Este endpoint consulta primero tu biblioteca local, y si no encuentra coincidencias agrega resultados remotos de The Pirate Bay, LimeTorrents y TorrentDownload. Normaliza los datos y elimina duplicados priorizando las semillas más activas.
+
+### Streaming de Archivo Local
+```http
+GET /api/library/stream?file=downloads/Album/tema.mp3
+```
+
 ### Streaming de Torrents
 ```http
 POST /api/stream
@@ -138,6 +147,25 @@ GET /api/torrent/{id}
 GET /api/downloads
 ```
 
+### Metadatos (MusicBrainz)
+```http
+GET /api/metadata/artist?q=dr%20dre
+```
+
+Devuelve artistas y lanzamientos relacionados para enriquecer la búsqueda, corregir errores ortográficos y mostrar sugerencias.
+
+### Biblioteca Local
+- `GET /api/library`: devuelve todos los archivos indexados en `./downloads`.
+- `GET /api/library/search?query=cancion&limit=20`: busca únicamente en tu biblioteca.
+- `POST /api/library/rescan`: fuerza un reescaneo del directorio de descargas.
+
+## 🗺️ Próximos Pasos
+- 🎚️ **Previews y buffers**: generar automáticamente los primeros segundos de cada pista para reproducir en cuanto el usuario pulse play, mientras WebTorrent conecta los peers.
+- 🧠 **Metadatos avanzados**: almacenar artista → álbum → pista en PostgreSQL y enriquecerlos con Spotify/MusicBrainz (carátulas, géneros, créditos).
+- 📱 **Modo offline móvil**: exponer endpoints para sincronizar canciones/álbumes al teléfono y reproducirlas sin conexión.
+- 🎵 **Importación de playlists**: permitir login con Spotify (OAuth) para traer playlists y mapear cada tema a los hashes disponibles en la red P2P.
+- 🧩 **Arquitectura modular**: dividir el backend en controllers/services/repos y ofrecer un SDK/API pública para futuros frontends (web, móvil, escritorio).
+
 ## 🎨 Estructura del Proyecto
 
 ```
@@ -145,7 +173,6 @@ torrentstream/
 ├── public/                 # Archivos estáticos del frontend
 │   ├── index.html         # Página principal
 │   ├── library.html       # Biblioteca
-│   ├── settings.html      # Configuración
 │   ├── main.js           # Lógica principal
 │   └── resources/        # Recursos multimedia
 ├── downloads/            # Archivos descargados

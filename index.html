@@ -10,12 +10,17 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Inter', sans-serif; }
-        .gradient-bg { background: linear-gradient(135deg, #1e293b 0%, #334155 100%); }
-        .glass-effect { backdrop-filter: blur(10px); background: rgba(255, 255, 255, 0.1); }
-        .torrent-card { transition: all 0.3s ease; }
-        .torrent-card:hover { transform: translateY(-2px); box-shadow: 0 10px 25px rgba(0,0,0,0.2); }
-        .search-container { background: rgba(15, 23, 42, 0.95); }
-        .player-container { background: #000; }
+        .gradient-bg { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); }
+        .torrent-card { transition: all 0.3s ease; border-left: 4px solid transparent; }
+        .torrent-card:hover { transform: translateY(-2px); border-color: #38bdf8; }
+        .search-container { background: rgba(15, 23, 42, 0.85); }
+        .hero-backdrop::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(180deg, rgba(15,23,42,0.85) 0%, rgba(15,23,42,0.95) 70%);
+        }
+        .player-container { background: #080b13; }
         .seed { color: #10b981; }
         .leech { color: #ef4444; }
         .download-speed { color: #3b82f6; }
@@ -25,6 +30,8 @@
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         .fade-in { animation: fadeIn 0.5s ease-in; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+        .queue-item { border-left: 3px solid #38bdf8; }
+        .queue-item.playing { border-color: #22c55e; background: rgba(34,197,94,0.08); }
     </style>
 </head>
 <body class="gradient-bg min-h-screen text-white">
@@ -38,10 +45,10 @@
                     </div>
                     <h1 class="text-2xl font-bold text-white">TorrentStream</h1>
                 </div>
-                <nav class="hidden md:flex space-x-6">
-                    <a href="#" class="text-slate-300 hover:text-white transition-colors">Inicio</a>
-                    <a href="#" class="text-slate-300 hover:text-white transition-colors">Biblioteca</a>
-                    <a href="#" class="text-slate-300 hover:text-white transition-colors">Configuración</a>
+                <nav class="hidden md:flex space-x-6 text-slate-400 text-sm">
+                    <span class="text-white font-semibold">Música</span>
+                    <span>Álbumes</span>
+                    <span>Podcasts</span>
                 </nav>
             </div>
         </div>
@@ -50,52 +57,60 @@
     <!-- Main Content -->
     <main class="container mx-auto px-4 py-8">
         <!-- Search Section -->
-        <section class="mb-8">
-            <div class="search-container rounded-2xl p-8 border border-slate-700">
-                <h2 class="text-3xl font-bold mb-6 text-center">Busca y Reproduce Torrents</h2>
+        <section class="mb-10 relative rounded-3xl overflow-hidden hero-backdrop">
+            <div id="heroBackdrop" class="absolute inset-0 bg-cover bg-center opacity-30"></div>
+            <div class="search-container relative rounded-3xl p-8 border border-slate-700">
+                <div class="max-w-4xl mx-auto text-center mb-8">
+                    <p class="text-sm uppercase tracking-widest text-slate-400 mb-2">Catálogo personal y redes P2P</p>
+                    <h2 class="text-4xl font-bold">Encuentra tu siguiente canción</h2>
+                    <p class="text-slate-300 mt-3">TorrentStream prioriza tu biblioteca local y, si no la encuentra, recurre a trackers musicales verificados.</p>
+                </div>
                 <div class="max-w-4xl mx-auto">
                     <div class="flex flex-col md:flex-row gap-4 mb-6">
                         <div class="flex-1 relative">
                             <input 
                                 type="text" 
                                 id="searchInput"
-                                placeholder="Buscar películas, series, música, software..."
+                                placeholder="Buscar canciones, álbumes o podcasts..."
                                 class="w-full px-6 py-4 bg-slate-800 border border-slate-600 rounded-xl text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                             >
                             <button id="searchBtn" class="absolute right-2 top-2 p-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors">
                                 <i class="fas fa-search text-white"></i>
                             </button>
                         </div>
-                        <select id="categorySelect" class="px-4 py-4 bg-slate-800 border border-slate-600 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
-                            <option value="all">Todas las categorías</option>
-                            <option value="movies">Películas</option>
-                            <option value="tv">Series TV</option>
-                            <option value="music">Música</option>
-                            <option value="games">Juegos</option>
-                            <option value="software">Software</option>
-                            <option value="books">Libros</option>
-                        </select>
                     </div>
                     
                     <!-- Filter Options -->
                     <div class="flex flex-wrap gap-4 mb-6">
-                        <div class="flex items-center space-x-2">
+                        <div class="flex items-center space-x-2 flex-wrap">
                             <label class="text-sm text-slate-400">Ordenar por:</label>
                             <select id="sortSelect" class="px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500">
-                                <option value="seeds">Seeds</option>
+                                <option value="relevance">Relevancia</option>
+                                <option value="seeds">Semillas</option>
                                 <option value="size">Tamaño</option>
                                 <option value="date">Fecha</option>
-                                <option value="peers">Peers</option>
                             </select>
                         </div>
+                        <div class="flex items-center space-x-2 flex-wrap">
+                            <label class="text-sm text-slate-400">Modo:</label>
+                            <div class="flex space-x-2">
+                                <button class="px-3 py-2 rounded-lg bg-blue-600 text-sm" data-search-mode="tracks">Canciones</button>
+                                <button class="px-3 py-2 rounded-lg bg-slate-700 text-sm hover:bg-slate-600 transition" data-search-mode="albums">Álbumes</button>
+                                <button class="px-3 py-2 rounded-lg bg-slate-700 text-sm hover:bg-slate-600 transition" data-search-mode="podcasts">Podcasts</button>
+                            </div>
+                        </div>
                         <div class="flex items-center space-x-2">
-                            <label class="text-sm text-slate-400">Calidad mínima:</label>
-                            <select id="qualitySelect" class="px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500">
-                                <option value="0">Cualquiera</option>
-                                <option value="10">10+ seeds</option>
-                                <option value="50">50+ seeds</option>
-                                <option value="100">100+ seeds</option>
-                            </select>
+                            <label class="text-sm text-slate-400">Filtros rápidos:</label>
+                            <div class="flex space-x-3 text-sm">
+                                <label class="inline-flex items-center space-x-1">
+                                    <input type="checkbox" id="filterLocalFirst" checked class="form-checkbox text-blue-500 rounded bg-slate-700 border-slate-600">
+                                    <span>Biblioteca primero</span>
+                                </label>
+                                <label class="inline-flex items-center space-x-1">
+                                    <input type="checkbox" id="filterLossless" class="form-checkbox text-blue-500 rounded bg-slate-700 border-slate-600">
+                                    <span>Solo lossless</span>
+                                </label>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -119,61 +134,36 @@
         <!-- Player Section -->
         <section id="playerSection" class="hidden mb-8">
             <div class="player-container rounded-2xl p-6 border border-slate-700">
-                <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-xl font-bold">Reproductor</h3>
-                    <button id="closePlayer" class="text-slate-400 hover:text-white transition-colors">
-                        <i class="fas fa-times text-lg"></i>
-                    </button>
-                </div>
-                
-                <!-- Video Player -->
-                <div class="relative bg-black rounded-xl overflow-hidden mb-4" style="aspect-ratio: 16/9;">
-                    <video id="videoPlayer" class="w-full h-full" controls>
-                        <source src="" type="video/mp4">
-                        Tu navegador no soporta el reproductor de video.
-                    </video>
-                    <div id="playerPlaceholder" class="absolute inset-0 flex items-center justify-center bg-slate-900">
-                        <div class="text-center">
-                            <i class="fas fa-play-circle text-6xl text-slate-600 mb-4"></i>
-                            <p class="text-slate-400">Selecciona un torrent para comenzar a reproducir</p>
-                        </div>
+                <div class="flex items-center gap-4">
+                    <div id="nowPlayingCover" class="w-20 h-20 rounded-xl bg-slate-800 flex items-center justify-center text-slate-500">
+                        <i class="fas fa-music text-2xl"></i>
                     </div>
-                </div>
-
-                <!-- Player Controls -->
-                <div class="flex items-center justify-between">
-                    <div class="flex items-center space-x-4">
+                    <div class="flex-1">
+                        <p class="text-xs uppercase tracking-wide text-slate-400">Reproduciendo ahora</p>
+                        <h3 id="nowPlayingTitle" class="text-xl font-semibold text-white mt-1">Selecciona una canción</h3>
+                        <p id="nowPlayingMeta" class="text-sm text-slate-400">Tu cola está vacía.</p>
+                    </div>
+                    <div class="flex items-center space-x-3">
                         <button id="playPauseBtn" class="p-3 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors">
                             <i class="fas fa-play text-white"></i>
                         </button>
-                        <div class="flex items-center space-x-2">
-                            <span class="text-sm text-slate-400" id="currentTime">0:00</span>
-                            <span class="text-sm text-slate-400">/</span>
-                            <span class="text-sm text-slate-400" id="duration">0:00</span>
-                        </div>
-                    </div>
-                    <div class="flex items-center space-x-4">
-                        <div class="flex items-center space-x-2">
-                            <i class="fas fa-download text-blue-500 text-sm"></i>
-                            <span class="text-sm download-speed" id="downloadSpeed">0 MB/s</span>
-                        </div>
-                        <div class="flex items-center space-x-2">
-                            <i class="fas fa-upload text-amber-500 text-sm"></i>
-                            <span class="text-sm upload-speed" id="uploadSpeed">0 MB/s</span>
-                        </div>
+                        <button id="closePlayer" class="p-3 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors">
+                            <i class="fas fa-times text-slate-300"></i>
+                        </button>
                     </div>
                 </div>
 
-                <!-- Progress Bar -->
                 <div class="mt-4">
-                    <div class="flex items-center justify-between mb-2">
-                        <span class="text-sm text-slate-400">Progreso de descarga</span>
-                        <span class="text-sm text-slate-400" id="progressPercent">0%</span>
+                    <div class="flex items-center justify-between text-xs text-slate-400 mb-1">
+                        <span id="currentTime">0:00</span>
+                        <span id="duration">0:00</span>
                     </div>
                     <div class="w-full bg-slate-700 rounded-full h-2">
                         <div id="progressBar" class="progress-bar bg-blue-600 h-2 rounded-full" style="width: 0%"></div>
                     </div>
                 </div>
+
+                <audio id="audioPlayer" class="w-full mt-4" controls></audio>
             </div>
         </section>
 
@@ -185,57 +175,28 @@
             </div>
         </section>
 
-        <!-- Popular Torrents -->
-        <section class="mb-8">
-            <h3 class="text-2xl font-bold mb-6">Torrents Populares</h3>
-            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                <div class="bg-slate-800/50 backdrop-blur-sm rounded-xl p-6 border border-slate-700 hover:border-slate-600 transition-colors cursor-pointer" onclick="searchPopular('Dune 2')">
-                    <div class="flex items-center justify-between mb-3">
-                        <span class="text-xs bg-blue-600 px-2 py-1 rounded-full">Película</span>
-                        <div class="flex items-center space-x-1">
-                            <i class="fas fa-star text-yellow-500 text-xs"></i>
-                            <span class="text-xs text-slate-400">8.5</span>
-                        </div>
-                    </div>
-                    <h4 class="font-semibold mb-2">Dune: Part Two</h4>
-                    <p class="text-sm text-slate-400 mb-3">Ciencia ficción épica continúa la saga de Paul Atreides</p>
-                    <div class="flex items-center justify-between text-xs">
-                        <span class="seed">2.3k seeds</span>
-                        <span class="text-slate-400">4.2 GB</span>
-                    </div>
+        <!-- Playback Queue -->
+        <section id="queueSection" class="mb-8">
+            <div class="flex items-center justify-between mb-4">
+                <div>
+                    <h3 class="text-2xl font-bold">Cola de reproducción</h3>
+                    <p class="text-slate-400 text-sm">Añade canciones o álbumes para escucharlos en secuencia.</p>
                 </div>
+                <button id="clearQueueBtn" class="text-sm text-slate-400 hover:text-white transition-colors flex items-center space-x-2">
+                    <i class="fas fa-trash-alt text-xs"></i>
+                    <span>Limpiar cola</span>
+                </button>
+            </div>
+            <div id="playQueueList" class="space-y-3">
+                <p class="text-slate-500 text-sm">Tu cola está vacía.</p>
+            </div>
+        </section>
 
-                <div class="bg-slate-800/50 backdrop-blur-sm rounded-xl p-6 border border-slate-700 hover:border-slate-600 transition-colors cursor-pointer" onclick="searchPopular('The Bear S03')">
-                    <div class="flex items-center justify-between mb-3">
-                        <span class="text-xs bg-green-600 px-2 py-1 rounded-full">Serie TV</span>
-                        <div class="flex items-center space-x-1">
-                            <i class="fas fa-star text-yellow-500 text-xs"></i>
-                            <span class="text-xs text-slate-400">9.2</span>
-                        </div>
-                    </div>
-                    <h4 class="font-semibold mb-2">The Bear - Season 3</h4>
-                    <p class="text-sm text-slate-400 mb-3">Drama sobre un chef en Chicago que regresa a casa</p>
-                    <div class="flex items-center justify-between text-xs">
-                        <span class="seed">1.8k seeds</span>
-                        <span class="text-slate-400">8.1 GB</span>
-                    </div>
-                </div>
-
-                <div class="bg-slate-800/50 backdrop-blur-sm rounded-xl p-6 border border-slate-700 hover:border-slate-600 transition-colors cursor-pointer" onclick="searchPopular('FL Studio 21')">
-                    <div class="flex items-center justify-between mb-3">
-                        <span class="text-xs bg-purple-600 px-2 py-1 rounded-full">Software</span>
-                        <div class="flex items-center space-x-1">
-                            <i class="fas fa-star text-yellow-500 text-xs"></i>
-                            <span class="text-xs text-slate-400">4.8</span>
-                        </div>
-                    </div>
-                    <h4 class="font-semibold mb-2">FL Studio 21</h4>
-                    <p class="text-sm text-slate-400 mb-3">Software de producción musical completo</p>
-                    <div class="flex items-center justify-between text-xs">
-                        <span class="seed">890 seeds</span>
-                        <span class="text-slate-400">1.1 GB</span>
-                    </div>
-                </div>
+        <!-- Dynamic Suggestions -->
+        <section id="suggestionsSection" class="mb-8 hidden">
+            <h3 class="text-2xl font-bold mb-6">Sugerencias relacionadas</h3>
+            <div id="suggestionsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <!-- Suggestions will be injected here -->
             </div>
         </section>
     </main>

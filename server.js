@@ -8,6 +8,16 @@ import https from 'https';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import * as cheerio from 'cheerio';
+import {
+    AUDIO_EXTENSIONS,
+    normalizeText,
+    isFuzzyMatch,
+    tokenizeQuery,
+    buildFilterTokens,
+    calculateRelevancyScore,
+    inferAudioQuality,
+    isLikelyAudioRelease
+} from './src/utils/text.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -16,6 +26,13 @@ const app = express();
 const client = new WebTorrent();
 
 const BASE_URL = 'https://thepibay.site';
+const LIMETORRENTS_BASE = 'https://www.limetorrents.lol';
+const TORRENTDOWNLOAD_BASE = 'https://www.torrentdownload.info';
+const TORLOCK_BASE = 'https://www.torlock.com';
+const X1337_BASE = 'https://www.1337x.to';
+const AUDIO_EXTENSION_SET = new Set(AUDIO_EXTENSIONS);
+const LIBRARY_CACHE = { entries: [], lastScan: 0, version: 0 };
+const LIBRARY_SCAN_INTERVAL = 60 * 1000;
 const SCRAPER_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36',
     'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
@@ -47,55 +64,41 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
+/**
+ * ===================
+ *  TORRENTSTREAM API
+ * ===================
+ *
+ * Este archivo concentra toda la lógica backend de la aplicación.
+ * Para facilitar su lectura añadimos docstrings en las funciones principales.
+ * El enfoque está dividido en:
+ *  - Normalización de texto y detección de audio.
+ *  - Índice de biblioteca local (scanLibrary + endpoints `/api/library`).
+ *  - Agregadores de fuentes públicas (Pirate Bay, LimeTorrents, TorrentDownload).
+ *  - Endpoints REST que exponen búsquedas, streaming y cola de descargas.
+ */
+
 // ==================== BUSCADOR DE MÚSICA MP3 EN THE PIRATE BAY ====================
-
-function normalizeText(value = '') {
-    return value
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .toLowerCase();
-}
-
-function tokenizeQuery(query) {
-    return normalizeText(query)
-        .split(/[^a-z0-9]+/)
-        .filter(Boolean);
-}
-
-function calculateRelevancyScore(title, tokens, seeds = 0) {
-    if (!tokens.length) {
-        return seeds;
-    }
-
-    let score = 0;
-    tokens.forEach(token => {
-        if (title.includes(token)) {
-            score += 5;
-        }
-    });
-
-    if (tokens.length && title.includes(tokens.join(' '))) {
-        score += 5;
-    }
-
-    return score + Math.log10(seeds + 1);
-}
-
-function inferAudioQuality(text = '') {
-    const normalized = normalizeText(text);
-    if (normalized.includes('flac')) return 'FLAC';
-    if (normalized.includes('320')) return '320 kbps';
-    if (normalized.includes('256')) return '256 kbps';
-    if (normalized.includes('192')) return '192 kbps';
-    if (normalized.includes('128')) return '128 kbps';
-    return 'Audio';
-}
 
 // Helpers específicos para Pirate Bay
 
 function extractInfoHash(magnet = '') {
     const match = magnet.match(/xt=urn:btih:([^&]+)/i);
     return match ? match[1] : null;
+}
+
+function extractHashFromString(value = '') {
+    const match = value.match(/([A-F0-9]{40})/i);
+    return match ? match[1] : null;
+}
+
+function resolveUrl(href = '', baseUrl = '') {
+    if (!href) return '';
+    try {
+        return new URL(href, baseUrl || undefined).toString();
+    } catch {
+        return href;
+    }
 }
 
 function formatPirateDescription(text = '') {
@@ -132,6 +135,12 @@ function formatBytes(bytes) {
     return `${(bytes / Math.pow(1024, index)).toFixed(2)} ${sizes[index]}`;
 }
 
+function parseNumeric(value) {
+    if (!value) return 0;
+    const parsed = parseInt(String(value).replace(/,/g, ''), 10);
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
 const MIME_TYPES = {
     mp3: 'audio/mpeg',
     flac: 'audio/flac',
@@ -141,11 +150,7 @@ const MIME_TYPES = {
     ogg: 'audio/ogg',
     opus: 'audio/ogg',
     alac: 'audio/mp4',
-    wma: 'audio/x-ms-wma',
-    mp4: 'video/mp4',
-    mkv: 'video/x-matroska',
-    webm: 'video/webm',
-    avi: 'video/x-msvideo'
+    wma: 'audio/x-ms-wma'
 };
 
 function getMimeType(filename = '') {
@@ -196,6 +201,218 @@ function determineStreamableFile(filesMeta = []) {
     return filesMeta.length ? filesMeta[0].index : null;
 }
 
+function isAudioFilename(filename = '') {
+    const ext = path.extname(filename).replace('.', '').toLowerCase();
+    return AUDIO_EXTENSION_SET.has(ext);
+}
+
+function parseAudioFileName(filename = '') {
+    const base = filename.replace(/\.[^.]+$/, '').replace(/[_]+/g, ' ').trim();
+    const parts = base.split(' - ').map(part => part.trim()).filter(Boolean);
+    if (parts.length >= 2) {
+        return {
+            artist: parts[0],
+            title: parts.slice(1).join(' - ')
+        };
+    }
+    return { artist: null, title: base };
+}
+
+function collectAudioFiles(dirPath) {
+    const results = [];
+    if (!fs.existsSync(dirPath)) {
+        return results;
+    }
+
+    const stack = [dirPath];
+    while (stack.length) {
+        const current = stack.pop();
+        const entries = fs.readdirSync(current, { withFileTypes: true });
+        entries.forEach(entry => {
+            const entryPath = path.join(current, entry.name);
+            if (entry.isDirectory()) {
+                if (!entry.name.startsWith('.')) {
+                    stack.push(entryPath);
+                }
+                return;
+            }
+            if (!entry.isFile() || !isAudioFilename(entry.name)) {
+                return;
+            }
+            results.push(entryPath);
+        });
+    }
+
+    return results;
+}
+
+function buildLibraryEntry(filePath) {
+    const relativePath = path.relative(DOWNLOADS_DIR, filePath).replace(/\\/g, '/');
+    const stats = fs.statSync(filePath);
+    const fileName = path.basename(filePath);
+    const { artist, title } = parseAudioFileName(fileName);
+    const normalizedName = normalizeText(fileName);
+    const directoryTokens = path.dirname(relativePath)
+        .split(/[\\/]/)
+        .map(part => normalizeText(part))
+        .filter(Boolean);
+    const keywords = Array.from(new Set([...buildFilterTokens(fileName), ...directoryTokens]));
+    const downloadUrl = `/${relativePath}`;
+    const streamUrl = `/api/library/stream?file=${encodeURIComponent(relativePath)}`;
+    const descriptionParts = [];
+    if (artist) descriptionParts.push(`Artista: ${artist}`);
+    if (path.dirname(relativePath) && path.dirname(relativePath) !== '.') {
+        descriptionParts.push(`Carpeta: ${path.dirname(relativePath)}`);
+    }
+
+    return {
+        id: relativePath,
+        name: title || fileName,
+        originalName: fileName,
+        artist,
+        album: path.basename(path.dirname(filePath)),
+        size: formatBytes(stats.size),
+        bytes: stats.size,
+        addedAt: stats.mtimeMs,
+        category: 'library',
+        type: 'audio',
+        quality: inferAudioQuality(fileName),
+        source: 'Biblioteca',
+        description: descriptionParts.join(' • ') || 'Archivo local en tu biblioteca',
+        isLocal: true,
+        files: [
+            {
+                name: fileName,
+                size: formatBytes(stats.size),
+                isAudio: true
+            }
+        ],
+        seeds: 0,
+        leechs: 0,
+        magnet: null,
+        infoHash: relativePath,
+        localPath: relativePath,
+        downloadUrl,
+        streamUrl,
+        normalizedName,
+        keywords
+    };
+}
+
+function scanLibrary(force = false) {
+    const now = Date.now();
+    if (!force && (now - LIBRARY_CACHE.lastScan) < LIBRARY_SCAN_INTERVAL) {
+        return LIBRARY_CACHE;
+    }
+
+    if (!fs.existsSync(DOWNLOADS_DIR)) {
+        LIBRARY_CACHE.entries = [];
+        LIBRARY_CACHE.lastScan = now;
+        LIBRARY_CACHE.version = now;
+        return LIBRARY_CACHE;
+    }
+
+    try {
+        const files = collectAudioFiles(DOWNLOADS_DIR);
+        const entries = files.map(buildLibraryEntry);
+        LIBRARY_CACHE.entries = entries;
+        LIBRARY_CACHE.lastScan = now;
+        LIBRARY_CACHE.version = now;
+    } catch (error) {
+        console.warn('⚠️ Error escaneando biblioteca local:', error.message);
+    }
+
+    return LIBRARY_CACHE;
+}
+
+function searchLibraryTracks(query, limit = 15, mode = 'tracks') {
+    const cache = scanLibrary();
+    const normalizedQuery = normalizeText(query).replace(/\s+/g, ' ').trim();
+    const condensedQuery = normalizedQuery.replace(/\s+/g, '');
+    const tokens = buildFilterTokens(query);
+    const effectiveLimit = mode === 'albums' ? limit * 4 : limit;
+
+    if (!tokens.length || !normalizedQuery) {
+        return cache.entries.slice(0, effectiveLimit);
+    }
+
+    const scored = cache.entries
+        .map(entry => {
+            const normalizedName = entry.normalizedName || normalizeText(entry.name || '');
+            const condensedName = normalizedName.replace(/\s+/g, '');
+            const containsFullQuery =
+                normalizedName.includes(normalizedQuery) ||
+                condensedName.includes(condensedQuery) ||
+                isFuzzyMatch(entry.name || '', query) ||
+                isFuzzyMatch(entry.artist || '', query) ||
+                isFuzzyMatch(entry.album || '', query);
+            if (!containsFullQuery) {
+                return null;
+            }
+
+            const matches = tokens.filter(token =>
+                normalizedName.includes(token) || entry.keywords.includes(token)
+            );
+            if (!matches.length) {
+                return null;
+            }
+            const ageDays = (Date.now() - entry.addedAt) / (1000 * 60 * 60 * 24);
+            const freshnessBonus = Math.max(0, 30 - ageDays) / 30;
+            const score = (matches.length * 6) + (tokens.length === matches.length ? 5 : 0) + (freshnessBonus * 3);
+            return { entry, score };
+        })
+        .filter(Boolean);
+
+    return scored
+        .sort((a, b) => b.score - a.score || b.entry.addedAt - a.entry.addedAt)
+        .slice(0, effectiveLimit)
+        .map(item => item.entry);
+}
+
+function groupLibraryTracksByAlbum(tracks, limit = 10) {
+    const groups = new Map();
+
+    tracks.forEach(track => {
+        const artist = track.artist || 'Desconocido';
+        const album = track.album || 'Colección';
+        const key = `${artist}::${album}`;
+        if (!groups.has(key)) {
+            groups.set(key, {
+                id: key,
+                artist,
+                album,
+                totalBytes: 0,
+                latest: track.addedAt || Date.now(),
+                tracks: []
+            });
+        }
+        const group = groups.get(key);
+        group.tracks.push(track);
+        group.totalBytes += track.bytes || 0;
+        group.latest = Math.max(group.latest, track.addedAt || 0);
+    });
+
+    return Array.from(groups.values())
+        .sort((a, b) => b.latest - a.latest)
+        .slice(0, limit)
+        .map(group => ({
+            id: group.id,
+            name: group.album || group.tracks[0]?.name || 'Álbum sin título',
+            artist: group.artist,
+            category: 'library-album',
+            type: 'album',
+            isLocal: true,
+            trackCount: group.tracks.length,
+            tracks: group.tracks,
+            size: formatBytes(group.totalBytes),
+            bytes: group.totalBytes,
+            quality: 'Archivo local',
+            description: `Álbum local con ${group.tracks.length} pistas`,
+            source: 'Biblioteca'
+        }));
+}
+
+
 async function fetchDocument(pathname) {
     const url = pathname.startsWith('http') ? pathname : `${BASE_URL}${pathname}`;
     const response = await axios.get(url, {
@@ -206,18 +423,40 @@ async function fetchDocument(pathname) {
     return cheerio.load(response.data);
 }
 
-async function searchPirateBayMusic(query, limit = 15) {
+async function fetchHtmlPage(url) {
+    const response = await axios.get(url, {
+        headers: SCRAPER_HEADERS,
+        httpsAgent: SCRAPER_AGENT,
+        timeout: 15000,
+        maxRedirects: 3
+    });
+    const finalUrl = response.request?.res?.responseUrl || url;
+    return {
+        $: cheerio.load(response.data),
+        finalUrl
+    };
+}
+
+async function fetchMagnetFromDetail(detailUrl) {
+    try {
+        const { $ } = await fetchHtmlPage(detailUrl);
+        return $('a[href^="magnet:?"]').first().attr('href') || '';
+    } catch (error) {
+        console.warn(`⚠️ Magnet fetch failed (${detailUrl}): ${error.message}`);
+        return '';
+    }
+}
+
+async function searchPirateBayMusic(query, limit = 15, options = {}) {
     try {
         const trimmedQuery = query.trim();
         if (!trimmedQuery) return [];
 
-        const tokens = tokenizeQuery(trimmedQuery);
-        const strongTokens = tokens.filter(token => token.length >= 4);
-        const filterTokens = strongTokens.length ? strongTokens : tokens;
+        const filterTokens = buildFilterTokens(trimmedQuery);
 
-        let results = await searchPirateBayViaApi(trimmedQuery, filterTokens, limit);
+        let results = await searchPirateBayViaApi(trimmedQuery, filterTokens, limit, options);
         if (!results.length) {
-            results = await searchPirateBayViaHtml(trimmedQuery, filterTokens, limit);
+            results = await searchPirateBayViaHtml(trimmedQuery, filterTokens, limit, options);
         }
 
         console.log(`✅ Pirate Bay encontró ${results.length} resultados de música`);
@@ -229,7 +468,8 @@ async function searchPirateBayMusic(query, limit = 15) {
     }
 }
 
-async function searchPirateBayViaApi(query, filterTokens, limit) {
+async function searchPirateBayViaApi(query, filterTokens, limit, options = {}) {
+    const { originalQuery = query } = options;
     try {
         const response = await axios.get(PIRATE_BAY_API, {
             params: { q: query, cat: PIRATE_BAY_CATEGORY },
@@ -251,7 +491,8 @@ async function searchPirateBayViaApi(query, filterTokens, limit) {
                 const name = item.name.trim();
                 const normalizedTitle = normalizeText(name);
                 const matchedTokens = filterTokens.filter(token => normalizedTitle.includes(token));
-                if (filterTokens.length && matchedTokens.length === 0) {
+                const fuzzyMatch = isFuzzyMatch(name, originalQuery);
+                if (!fuzzyMatch && filterTokens.length && matchedTokens.length === 0) {
                     return null;
                 }
 
@@ -259,6 +500,7 @@ async function searchPirateBayViaApi(query, filterTokens, limit) {
                 const leechs = parseInt(item.leechers, 10) || 0;
                 const sizeBytes = Number(item.size) || 0;
                 const sizeLabel = sizeBytes ? formatBytes(sizeBytes) : '';
+                const fuzzyBonus = fuzzyMatch ? 5 : 0;
 
                 return {
                     name,
@@ -277,10 +519,11 @@ async function searchPirateBayViaApi(query, filterTokens, limit) {
                         uploaded: formatUnixDate(item.added),
                         uploader: item.username || ''
                     }) || 'Lanzamiento de audio',
-                    score: calculateRelevancyScore(normalizedTitle, filterTokens, seeds) + matchedTokens.length
+                    score: calculateRelevancyScore(normalizedTitle, filterTokens, seeds) + matchedTokens.length + fuzzyBonus
                 };
             })
-            .filter(Boolean);
+            .filter(Boolean)
+            .filter(item => isLikelyAudioRelease(item.name));
 
         return mapped
             .sort((a, b) => b.score - a.score || b.seeds - a.seeds)
@@ -293,7 +536,8 @@ async function searchPirateBayViaApi(query, filterTokens, limit) {
     }
 }
 
-async function searchPirateBayViaHtml(query, filterTokens, limit) {
+async function searchPirateBayViaHtml(query, filterTokens, limit, options = {}) {
+    const { originalQuery = query } = options;
     const collected = [];
 
     for (let page = 1; page <= MAX_PAGES && collected.length < limit; page++) {
@@ -316,7 +560,8 @@ async function searchPirateBayViaHtml(query, filterTokens, limit) {
 
                 const normalizedTitle = normalizeText(name);
                 const matchedTokens = filterTokens.filter(token => normalizedTitle.includes(token));
-                if (filterTokens.length && matchedTokens.length === 0) {
+                const fuzzyMatch = isFuzzyMatch(name, originalQuery);
+                if (!fuzzyMatch && filterTokens.length && matchedTokens.length === 0) {
                     return;
                 }
 
@@ -325,7 +570,7 @@ async function searchPirateBayViaHtml(query, filterTokens, limit) {
                 const infoHash = extractInfoHash(magnetLink);
                 const detailUrl = href.startsWith('http') ? href : `${BASE_URL}${href}`;
 
-                const score = calculateRelevancyScore(normalizedTitle, filterTokens, seeds) + matchedTokens.length;
+                const score = calculateRelevancyScore(normalizedTitle, filterTokens, seeds) + matchedTokens.length + (fuzzyMatch ? 5 : 0);
 
                 collected.push({
                     name,
@@ -350,11 +595,513 @@ async function searchPirateBayViaHtml(query, filterTokens, limit) {
         }
     }
 
-    return collected
-        .sort((a, b) => b.score - a.score || b.seeds - a.seeds)
-        .slice(0, limit)
-        .map(({ score, ...rest }) => rest);
+        return collected
+            .filter(item => isLikelyAudioRelease(item.name))
+            .sort((a, b) => b.score - a.score || b.seeds - a.seeds)
+            .slice(0, limit)
+            .map(({ score, ...rest }) => rest);
 }
+
+async function searchLimeTorrentsMusic(query, limit = 15, options = {}) {
+    try {
+        const trimmedQuery = query.trim();
+        if (!trimmedQuery) return [];
+
+        const { originalQuery = query } = options;
+        const filterTokens = buildFilterTokens(trimmedQuery);
+        const searchUrl = `${LIMETORRENTS_BASE}/search/music/${encodeURIComponent(trimmedQuery)}/1/`;
+        const { $, finalUrl } = await fetchHtmlPage(searchUrl);
+        const rows = $('table.table2 tr').toArray();
+        const collected = [];
+
+        rows.forEach((row) => {
+            const nameWrapper = $(row).find('.tt-name');
+            if (!nameWrapper.length) {
+                return;
+            }
+
+            const detailLink = nameWrapper.find('a').last();
+            const torrentLink = nameWrapper.find('a[href*="itorrents"]').first().attr('href');
+            const name = detailLink.text().replace(/\s+/g, ' ').trim();
+            if (!name) return;
+
+            const normalizedTitle = normalizeText(name);
+            const matchedTokens = filterTokens.filter(token => normalizedTitle.includes(token));
+            const fuzzyMatch = isFuzzyMatch(name, originalQuery);
+            if (!fuzzyMatch && filterTokens.length && matchedTokens.length === 0) {
+                return;
+            }
+
+            const cells = $(row).find('td');
+            if (cells.length < 5) {
+                return;
+            }
+
+            const addedText = cells.eq(1).text().trim();
+            const sizeText = cells.eq(2).text().trim() || 'Desconocido';
+            const seeds = parseNumeric(cells.eq(3).text());
+            const leechs = parseNumeric(cells.eq(4).text());
+            const infoHash = extractHashFromString(torrentLink);
+            const magnet = infoHash ? buildMagnetLink(name, infoHash) : torrentLink || '';
+            const score = calculateRelevancyScore(normalizedTitle, filterTokens, seeds) + matchedTokens.length + (fuzzyMatch ? 5 : 0);
+
+            collected.push({
+                name,
+                size: sizeText,
+                seeds,
+                leechs,
+                category: 'music',
+                type: 'audio',
+                quality: inferAudioQuality(name),
+                url: resolveUrl(detailLink.attr('href'), finalUrl),
+                magnet,
+                infoHash: infoHash || extractInfoHash(magnet),
+                files: [],
+                description: addedText || 'Resultado de LimeTorrents',
+                source: 'LimeTorrents',
+                score
+            });
+        });
+
+        return collected
+            .filter(item => isLikelyAudioRelease(item.name))
+            .sort((a, b) => b.score - a.score || b.seeds - a.seeds)
+            .slice(0, limit)
+            .map(({ score, ...rest }) => rest);
+    } catch (error) {
+        console.warn(`⚠️ LimeTorrents error: ${error.message}`);
+        return [];
+    }
+}
+
+async function searchTorrentDownloadMusic(query, limit = 15, options = {}) {
+    try {
+        const trimmedQuery = query.trim();
+        if (!trimmedQuery) return [];
+
+        const { originalQuery = query } = options;
+        const filterTokens = buildFilterTokens(trimmedQuery);
+        const searchUrl = `${TORRENTDOWNLOAD_BASE}/search?q=${encodeURIComponent(trimmedQuery)}`;
+        const { $, finalUrl } = await fetchHtmlPage(searchUrl);
+        const rows = $('table.table2 tr').toArray();
+        const collected = [];
+
+        rows.forEach((row) => {
+            const cells = $(row).find('td');
+            if (cells.length < 5) return;
+
+            const nameAnchor = cells.eq(0).find('.tt-name a').first();
+            const name = nameAnchor.text().replace(/\s+/g, ' ').trim();
+            if (!name) return;
+
+            const categoryText = cells.eq(0).find('.smallish').text().toLowerCase();
+            if (categoryText && !categoryText.includes('music')) {
+                return;
+            }
+
+            const normalizedTitle = normalizeText(name);
+            const matchedTokens = filterTokens.filter(token => normalizedTitle.includes(token));
+            const fuzzyMatch = isFuzzyMatch(name, originalQuery);
+            if (!fuzzyMatch && filterTokens.length && matchedTokens.length === 0) {
+                return;
+            }
+
+            const detailHref = nameAnchor.attr('href');
+            const infoHash = extractHashFromString(detailHref);
+            const seeds = parseNumeric(cells.eq(3).text());
+            const leechs = parseNumeric(cells.eq(4).text());
+            const score = calculateRelevancyScore(normalizedTitle, filterTokens, seeds) + matchedTokens.length + (fuzzyMatch ? 5 : 0);
+
+            collected.push({
+                name,
+                size: cells.eq(2).text().trim() || 'Desconocido',
+                seeds,
+                leechs,
+                category: 'music',
+                type: 'audio',
+                quality: inferAudioQuality(name),
+                url: resolveUrl(detailHref, finalUrl),
+                magnet: infoHash ? buildMagnetLink(name, infoHash) : '',
+                infoHash,
+                files: [],
+                description: cells.eq(1).text().trim() || 'Resultado de TorrentDownload',
+                source: 'TorrentDownload',
+                score
+            });
+        });
+
+        return collected
+            .filter(item => isLikelyAudioRelease(item.name))
+            .sort((a, b) => b.score - a.score || b.seeds - a.seeds)
+            .slice(0, limit)
+            .map(({ score, ...rest }) => rest);
+    } catch (error) {
+        console.warn(`⚠️ TorrentDownload error: ${error.message}`);
+        return [];
+    }
+}
+
+async function searchTorlockMusic(query, limit = 15, options = {}) {
+    try {
+        const { originalQuery = query } = options;
+        const trimmedQuery = query.trim();
+        if (!trimmedQuery) return [];
+
+        const filterTokens = buildFilterTokens(trimmedQuery);
+        const searchUrl = `${TORLOCK_BASE}/all/torrents/${encodeURIComponent(trimmedQuery)}.html`;
+        const { $, finalUrl } = await fetchHtmlPage(searchUrl);
+        const rows = $('table#tableDetails tr').toArray();
+        const collected = [];
+
+        rows.forEach(row => {
+            const nameLink = $(row).find('td:nth-child(1) a').first();
+            const name = nameLink.text().trim();
+            if (!name) return;
+
+            const normalizedTitle = normalizeText(name);
+            const matchedTokens = filterTokens.filter(token => normalizedTitle.includes(token));
+            const fuzzyMatch = isFuzzyMatch(name, originalQuery);
+            if (!fuzzyMatch && filterTokens.length && matchedTokens.length === 0) {
+                return;
+            }
+
+            const detailHref = nameLink.attr('href');
+            const detailUrl = detailHref?.startsWith('http') ? detailHref : `${TORLOCK_BASE}${detailHref}`;
+            const seeds = parseNumeric($(row).find('td:nth-child(6)').text());
+            const leechs = parseNumeric($(row).find('td:nth-child(7)').text());
+            const sizeText = $(row).find('td:nth-child(5)').text().trim();
+
+            collected.push({
+                name,
+                seeds,
+                leechs,
+                size: sizeText || 'Desconocido',
+                url: detailUrl,
+                detailUrl,
+                quality: inferAudioQuality(name),
+                source: 'Torlock',
+                fuzzy: fuzzyMatch,
+                matchedTokens,
+                score: calculateRelevancyScore(normalizedTitle, filterTokens, seeds) + matchedTokens.length + (fuzzyMatch ? 5 : 0)
+            });
+        });
+
+        const enriched = [];
+        for (const item of collected.sort((a, b) => b.score - a.score || b.seeds - a.seeds)) {
+            if (enriched.length >= limit) break;
+            if (!isLikelyAudioRelease(item.name)) continue;
+            const magnet = item.detailUrl ? await fetchMagnetFromDetail(item.detailUrl) : '';
+            if (!magnet) continue;
+            enriched.push({
+                name: item.name,
+                seeds: item.seeds,
+                leechs: item.leechs,
+                size: item.size,
+                magnet,
+                infoHash: extractInfoHash(magnet),
+                source: item.source,
+                quality: item.quality,
+                category: 'music',
+                type: 'audio',
+                description: `Resultado de ${item.source}`,
+                files: []
+            });
+        }
+
+        return enriched;
+    } catch (error) {
+        console.warn(`⚠️ Torlock error: ${error.message}`);
+        return [];
+    }
+}
+
+async function search1337xMusic(query, limit = 15, options = {}) {
+    try {
+        const { originalQuery = query } = options;
+        const trimmedQuery = query.trim();
+        if (!trimmedQuery) return [];
+
+        const filterTokens = buildFilterTokens(trimmedQuery);
+        const searchUrl = `${X1337_BASE}/category-search/${encodeURIComponent(trimmedQuery)}/Music/1/`;
+        const { $, finalUrl } = await fetchHtmlPage(searchUrl);
+        const rows = $('table.table-list tbody tr').toArray();
+        const collected = [];
+
+        rows.forEach(row => {
+            const nameLink = $(row).find('td.name a').last();
+            const name = nameLink.text().trim();
+            if (!name) return;
+
+            const normalizedTitle = normalizeText(name);
+            const matchedTokens = filterTokens.filter(token => normalizedTitle.includes(token));
+            const fuzzyMatch = isFuzzyMatch(name, originalQuery);
+            if (!fuzzyMatch && filterTokens.length && matchedTokens.length === 0) {
+                return;
+            }
+
+            const detailHref = nameLink.attr('href');
+            const detailUrl = detailHref?.startsWith('http') ? detailHref : `${X1337_BASE}${detailHref}`;
+            const seeds = parseNumeric($(row).find('td.seeds').text());
+            const leechs = parseNumeric($(row).find('td.leeches').text());
+            const sizeText = $(row).find('td.size').text().trim();
+
+            collected.push({
+                name,
+                seeds,
+                leechs,
+                size: sizeText || 'Desconocido',
+                detailUrl,
+                quality: inferAudioQuality(name),
+                source: '1337x',
+                score: calculateRelevancyScore(normalizedTitle, filterTokens, seeds) + matchedTokens.length + (fuzzyMatch ? 5 : 0)
+            });
+        });
+
+        const enriched = [];
+        for (const item of collected.sort((a, b) => b.score - a.score || b.seeds - a.seeds)) {
+            if (enriched.length >= limit) break;
+            if (!isLikelyAudioRelease(item.name)) continue;
+            const magnet = item.detailUrl ? await fetchMagnetFromDetail(item.detailUrl) : '';
+            if (!magnet) continue;
+            enriched.push({
+                name: item.name,
+                seeds: item.seeds,
+                leechs: item.leechs,
+                size: item.size,
+                magnet,
+                infoHash: extractInfoHash(magnet),
+                source: item.source,
+                quality: item.quality,
+                category: 'music',
+                type: 'audio',
+                description: `Resultado de ${item.source}`,
+                files: []
+            });
+        }
+
+        return enriched;
+    } catch (error) {
+        console.warn(`⚠️ 1337x error: ${error.message}`);
+        return [];
+    }
+}
+
+const MUSIC_PROVIDERS = [
+    { name: 'The Pirate Bay', handler: searchPirateBayMusic },
+    { name: 'LimeTorrents', handler: searchLimeTorrentsMusic },
+    { name: 'TorrentDownload', handler: searchTorrentDownloadMusic },
+    { name: 'Torlock', handler: searchTorlockMusic },
+    { name: '1337x', handler: search1337xMusic }
+];
+
+async function fetchMusicBrainzArtists(query, limit = 3) {
+    try {
+        const response = await axios.get('https://musicbrainz.org/ws/2/artist', {
+            params: {
+                query: `artist:${query}`,
+                limit,
+                fmt: 'json'
+            },
+            headers: {
+                'User-Agent': 'TorrentStream/1.0 (https://example.com)'
+            }
+        });
+
+        if (!response.data?.artists) return [];
+
+        return response.data.artists.map(artist => ({
+            id: artist.id,
+            name: artist.name,
+            disambiguation: artist.disambiguation || '',
+            score: artist.score || 0
+        }));
+    } catch (error) {
+        console.warn('⚠️ MusicBrainz artist lookup failed:', error.message);
+        return [];
+    }
+}
+
+async function fetchMusicBrainzReleases(artistId, limit = 5) {
+    try {
+        const response = await axios.get('https://musicbrainz.org/ws/2/release-group', {
+            params: {
+                artist: artistId,
+                type: 'album|ep',
+                fmt: 'json',
+                limit
+            },
+            headers: {
+                'User-Agent': 'TorrentStream/1.0 (https://example.com)'
+            }
+        });
+
+        if (!response.data?.['release-groups']) return [];
+
+        return response.data['release-groups'].map(group => ({
+            id: group.id,
+            title: group.title,
+            firstReleaseDate: group['first-release-date'],
+            primaryType: group['primary-type']
+        }));
+    } catch (error) {
+        console.warn('⚠️ MusicBrainz releases lookup failed:', error.message);
+        return [];
+    }
+}
+
+async function searchAllMusicSources(query, limit = 15, options = {}) {
+    const { mode = 'tracks' } = options;
+    const providerPromises = MUSIC_PROVIDERS.map(async ({ name, handler }) => {
+        try {
+            const providerResults = await handler(query, limit, { mode, originalQuery: query });
+            return providerResults.map(result => ({
+                ...result,
+                source: result.source || name
+            }));
+        } catch (error) {
+            console.warn(`⚠️ ${name} búsqueda falló: ${error.message}`);
+            return [];
+        }
+    });
+
+    const combined = (await Promise.all(providerPromises)).flat();
+    if (!combined.length) {
+        return [];
+    }
+
+    const deduped = new Map();
+    combined.forEach(result => {
+        const keyBase = result.infoHash || normalizeText(result.name || '');
+        if (!keyBase) return;
+        const key = keyBase.toLowerCase();
+        const current = deduped.get(key);
+        if (!current || (current.seeds || 0) < (result.seeds || 0)) {
+            deduped.set(key, result);
+        }
+    });
+
+    const filtered = Array.from(deduped.values())
+        .filter(result => {
+            if (result.isLocal) {
+                return true;
+            }
+            if (!isLikelyAudioRelease(result.name)) {
+                return false;
+            }
+            return (result.seeds || 0) > 0;
+        });
+
+    return filtered
+        .sort((a, b) => (b.seeds || 0) - (a.seeds || 0))
+        .slice(0, limit);
+}
+
+async function expandQueriesWithMetadata(query) {
+    const artists = await fetchMusicBrainzArtists(query, 3);
+    const canonicalNames = artists
+        .filter(artist => artist.score >= 60)
+        .map(artist => artist.name)
+        .filter(name => normalizeText(name) !== normalizeText(query));
+    return Array.from(new Set(canonicalNames));
+}
+
+// ==================== BIBLIOTECA LOCAL ====================
+
+app.get('/api/library', (req, res) => {
+    const cache = scanLibrary();
+    res.json({
+        tracks: cache.entries,
+        lastScan: cache.lastScan,
+        version: cache.version
+    });
+});
+
+app.post('/api/library/rescan', (req, res) => {
+    const cache = scanLibrary(true);
+    res.json({
+        success: true,
+        total: cache.entries.length,
+        lastScan: cache.lastScan
+    });
+});
+
+app.get('/api/library/search', (req, res) => {
+    const query = req.query.q || req.query.query || '';
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+    const matches = query ? searchLibraryTracks(query, limit) : scanLibrary().entries.slice(0, limit);
+    res.json({
+        tracks: matches,
+        total: matches.length
+    });
+});
+
+app.get('/api/library/stream', (req, res) => {
+    try {
+        const relative = req.query.file;
+        if (!relative || typeof relative !== 'string') {
+            return res.status(400).json({ error: 'File parameter required' });
+        }
+
+        const resolvedPath = path.normalize(path.join(DOWNLOADS_DIR, relative));
+        if (!resolvedPath.startsWith(DOWNLOADS_DIR)) {
+            return res.status(400).json({ error: 'Invalid path' });
+        }
+
+        if (!fs.existsSync(resolvedPath)) {
+            return res.status(404).json({ error: 'File not found' });
+        }
+
+        const stat = fs.statSync(resolvedPath);
+        const total = stat.size;
+        const range = req.headers.range;
+        const mimeType = getMimeType(resolvedPath);
+
+        if (range) {
+            const parts = range.replace(/bytes=/, '').split('-');
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : total - 1;
+            const chunkSize = (end - start) + 1;
+            const stream = fs.createReadStream(resolvedPath, { start, end });
+
+            res.writeHead(206, {
+                'Content-Range': `bytes ${start}-${end}/${total}`,
+                'Accept-Ranges': 'bytes',
+                'Content-Length': chunkSize,
+                'Content-Type': mimeType
+            });
+            stream.pipe(res);
+        } else {
+            res.writeHead(200, {
+                'Content-Length': total,
+                'Content-Type': mimeType
+            });
+            fs.createReadStream(resolvedPath).pipe(res);
+        }
+    } catch (error) {
+        console.error('Library stream error:', error.message);
+        res.status(500).json({ error: 'Failed to stream local file' });
+    }
+});
+
+app.get('/api/metadata/artist', async (req, res) => {
+    try {
+        const query = String(req.query.q || req.query.query || '').trim();
+        if (!query) {
+            return res.status(400).json({ error: 'Query parameter required' });
+        }
+
+        const artists = await fetchMusicBrainzArtists(query, 5);
+        const enriched = await Promise.all(artists.map(async artist => {
+            const releases = await fetchMusicBrainzReleases(artist.id, 5);
+            return { ...artist, releases };
+        }));
+
+        res.json({ artists: enriched });
+    } catch (error) {
+        console.error('Metadata lookup failed:', error.message);
+        res.status(500).json({ error: 'Failed to fetch metadata' });
+    }
+});
 
 // Endpoint de búsqueda para música
 app.get('/api/search', async (req, res) => {
@@ -364,10 +1111,47 @@ app.get('/api/search', async (req, res) => {
             return res.status(400).json({ error: 'Query parameter required' });
         }
         const limit = Math.min(parseInt(req.query.limit, 10) || 15, 30);
+        const mode = typeof req.query.mode === 'string' ? req.query.mode : 'tracks';
+        const queryCandidates = [query, ...await expandQueriesWithMetadata(query)];
+        const seenQueries = new Set();
+        const aggregated = new Map();
 
-        // Buscar MP3 en The Pirate Bay
-        const results = await searchPirateBayMusic(query, limit);
-        res.json(results);
+        for (const candidate of queryCandidates) {
+            const normalizedCandidate = normalizeText(candidate);
+            if (seenQueries.has(normalizedCandidate)) {
+                continue;
+            }
+            seenQueries.add(normalizedCandidate);
+
+            const localRaw = searchLibraryTracks(candidate, limit, mode);
+            const localResults = mode === 'albums'
+                ? groupLibraryTracksByAlbum(localRaw, limit)
+                : localRaw;
+
+            localResults.forEach(item => {
+                const key = item.id || item.infoHash || `${normalizeText(item.name || '')}-${item.source || 'library'}`;
+                if (!aggregated.has(key)) {
+                    aggregated.set(key, { ...item, matchedQuery: candidate });
+                }
+            });
+
+            if (aggregated.size >= limit) break;
+
+            const remainingSlots = Math.max(limit - aggregated.size, 0);
+            if (remainingSlots > 0) {
+                const remoteResults = await searchAllMusicSources(candidate, remainingSlots, { mode, originalQuery: candidate });
+                remoteResults.forEach(item => {
+                    const key = item.infoHash || `${normalizeText(item.name || '')}-${item.source || 'remote'}`;
+                    if (!aggregated.has(key)) {
+                        aggregated.set(key, { ...item, matchedQuery: candidate });
+                    }
+                });
+            }
+
+            if (aggregated.size >= limit) break;
+        }
+
+        res.json(Array.from(aggregated.values()).slice(0, limit));
         
     } catch (error) {
         console.error('Search error:', error.message);
@@ -625,7 +1409,7 @@ if (process.argv[1] === __filename) {
     app.listen(PORT, () => {
         console.log(`🎵 TorrentStream server running on port ${PORT}`);
         console.log(`🎵 WebTorrent client ready for P2P connections`);
-        console.log(`🎵 Buscando música MP3 en The Pirate Bay`);
+        console.log(`🎵 Buscando música MP3 en biblioteca local y fuentes públicas`);
     });
 }
 
