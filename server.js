@@ -5,6 +5,8 @@ import axios from 'axios';
 import path from 'path';
 import fs from 'fs';
 import https from 'https';
+import dns from 'dns';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import * as cheerio from 'cheerio';
@@ -29,7 +31,19 @@ const BASE_URL = 'https://thepibay.site';
 const LIMETORRENTS_BASE = 'https://www.limetorrents.lol';
 const TORRENTDOWNLOAD_BASE = 'https://www.torrentdownload.info';
 const TORLOCK_BASE = 'https://www.torlock.com';
+const TORLOCK_MIRRORS = [
+    TORLOCK_BASE,
+    'https://torlock.unblockit.bet',
+    'https://torlock.unblocked.bet',
+    'https://torlock.unblockninja.com'
+].map(url => url.replace(/\/+$/, ''));
 const X1337_BASE = 'https://www.1337x.to';
+const X1337_MIRRORS = [
+    X1337_BASE,
+    'https://www.1337x.st',
+    'https://www.1377x.to',
+    'https://1337x.unblockninja.com'
+].map(url => url.replace(/\/+$/, ''));
 const AUDIO_EXTENSION_SET = new Set(AUDIO_EXTENSIONS);
 const LIBRARY_CACHE = { entries: [], lastScan: 0, version: 0 };
 const LIBRARY_SCAN_INTERVAL = 60 * 1000;
@@ -38,7 +52,27 @@ const SCRAPER_HEADERS = {
     'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
     'Referer': `${BASE_URL}/`
 };
-const SCRAPER_AGENT = new https.Agent({ rejectUnauthorized: false, keepAlive: true });
+const PROXY_URL = process.env.TORRENT_PROXY_URL ||
+    process.env.TORRENT_HTTP_PROXY ||
+    process.env.HTTPS_PROXY ||
+    process.env.HTTP_PROXY ||
+    process.env.ALL_PROXY ||
+    null;
+const originalLookup = dns.lookup;
+dns.lookup = (hostname, options, callback) => {
+    if (typeof options === 'function') {
+        return originalLookup(hostname, { family: 4 }, options);
+    }
+    const opts = typeof options === 'object'
+        ? { ...options, family: 4 }
+        : { family: 4 };
+    return originalLookup(hostname, opts, callback);
+};
+const agentOptions = { rejectUnauthorized: false, keepAlive: true, family: 4 };
+const SCRAPER_AGENT = PROXY_URL
+    ? new HttpsProxyAgent(PROXY_URL, agentOptions)
+    : new https.Agent(agentOptions);
+dns.setDefaultResultOrder('ipv4first');
 const PIRATE_BAY_CATEGORY = 101; // Audio > Music
 const MAX_PAGES = 2;
 const PIRATE_BAY_API = 'https://apibay.org/q.php';
@@ -49,6 +83,29 @@ const DEFAULT_TRACKERS = [
     'udp://tracker.leechers-paradise.org:6969/announce'
 ];
 const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
+const REQUEST_TIMEOUT = 15000;
+
+if (PROXY_URL) {
+    console.log(`🌐 Proxy HTTP configurado para scrapers: ${PROXY_URL}`);
+}
+
+function buildRequestConfig(overrides = {}) {
+    const { headers, ...rest } = overrides;
+    const baseHeaders = { ...SCRAPER_HEADERS };
+    const baseConfig = {
+        timeout: REQUEST_TIMEOUT,
+        maxRedirects: 3,
+        httpsAgent: SCRAPER_AGENT,
+        httpAgent: SCRAPER_AGENT,
+        proxy: PROXY_URL ? false : undefined
+    };
+
+    return {
+        ...baseConfig,
+        ...rest,
+        headers: { ...baseHeaders, ...(headers || {}) }
+    };
+}
 
 if (!fs.existsSync(DOWNLOADS_DIR)) {
     fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
@@ -415,21 +472,12 @@ function groupLibraryTracksByAlbum(tracks, limit = 10) {
 
 async function fetchDocument(pathname) {
     const url = pathname.startsWith('http') ? pathname : `${BASE_URL}${pathname}`;
-    const response = await axios.get(url, {
-        headers: SCRAPER_HEADERS,
-        httpsAgent: SCRAPER_AGENT,
-        timeout: 15000
-    });
+    const response = await axios.get(url, buildRequestConfig());
     return cheerio.load(response.data);
 }
 
 async function fetchHtmlPage(url) {
-    const response = await axios.get(url, {
-        headers: SCRAPER_HEADERS,
-        httpsAgent: SCRAPER_AGENT,
-        timeout: 15000,
-        maxRedirects: 3
-    });
+    const response = await axios.get(url, buildRequestConfig());
     const finalUrl = response.request?.res?.responseUrl || url;
     return {
         $: cheerio.load(response.data),
@@ -471,14 +519,13 @@ async function searchPirateBayMusic(query, limit = 15, options = {}) {
 async function searchPirateBayViaApi(query, filterTokens, limit, options = {}) {
     const { originalQuery = query } = options;
     try {
-        const response = await axios.get(PIRATE_BAY_API, {
+        const response = await axios.get(PIRATE_BAY_API, buildRequestConfig({
             params: { q: query, cat: PIRATE_BAY_CATEGORY },
             headers: {
                 'User-Agent': SCRAPER_HEADERS['User-Agent'],
                 'Accept': 'application/json'
-            },
-            timeout: 15000
-        });
+            }
+        }));
 
         const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
         if (!Array.isArray(data)) {
@@ -748,8 +795,23 @@ async function searchTorlockMusic(query, limit = 15, options = {}) {
         if (!trimmedQuery) return [];
 
         const filterTokens = buildFilterTokens(trimmedQuery);
-        const searchUrl = `${TORLOCK_BASE}/all/torrents/${encodeURIComponent(trimmedQuery)}.html`;
-        const { $, finalUrl } = await fetchHtmlPage(searchUrl);
+        let pageData = null;
+        for (const mirror of TORLOCK_MIRRORS) {
+            const searchUrl = `${mirror}/all/torrents/${encodeURIComponent(trimmedQuery)}.html`;
+            try {
+                const data = await fetchHtmlPage(searchUrl);
+                pageData = { ...data, baseUrl: mirror };
+                break;
+            } catch (error) {
+                console.warn(`⚠️ Torlock mirror ${mirror} error: ${error.message}`);
+            }
+        }
+
+        if (!pageData) {
+            return [];
+        }
+
+        const { $, finalUrl, baseUrl } = pageData;
         const rows = $('table#tableDetails tr').toArray();
         const collected = [];
 
@@ -766,7 +828,7 @@ async function searchTorlockMusic(query, limit = 15, options = {}) {
             }
 
             const detailHref = nameLink.attr('href');
-            const detailUrl = detailHref?.startsWith('http') ? detailHref : `${TORLOCK_BASE}${detailHref}`;
+            const detailUrl = detailHref?.startsWith('http') ? detailHref : `${baseUrl}${detailHref}`;
             const seeds = parseNumeric($(row).find('td:nth-child(6)').text());
             const leechs = parseNumeric($(row).find('td:nth-child(7)').text());
             const sizeText = $(row).find('td:nth-child(5)').text().trim();
@@ -822,8 +884,23 @@ async function search1337xMusic(query, limit = 15, options = {}) {
         if (!trimmedQuery) return [];
 
         const filterTokens = buildFilterTokens(trimmedQuery);
-        const searchUrl = `${X1337_BASE}/category-search/${encodeURIComponent(trimmedQuery)}/Music/1/`;
-        const { $, finalUrl } = await fetchHtmlPage(searchUrl);
+        let pageData = null;
+        for (const mirror of X1337_MIRRORS) {
+            const searchUrl = `${mirror}/category-search/${encodeURIComponent(trimmedQuery)}/Music/1/`;
+            try {
+                const data = await fetchHtmlPage(searchUrl);
+                pageData = { ...data, baseUrl: mirror };
+                break;
+            } catch (error) {
+                console.warn(`⚠️ 1337x mirror ${mirror} error: ${error.message}`);
+            }
+        }
+
+        if (!pageData) {
+            return [];
+        }
+
+        const { $, baseUrl } = pageData;
         const rows = $('table.table-list tbody tr').toArray();
         const collected = [];
 
@@ -840,7 +917,7 @@ async function search1337xMusic(query, limit = 15, options = {}) {
             }
 
             const detailHref = nameLink.attr('href');
-            const detailUrl = detailHref?.startsWith('http') ? detailHref : `${X1337_BASE}${detailHref}`;
+            const detailUrl = detailHref?.startsWith('http') ? detailHref : `${baseUrl}${detailHref}`;
             const seeds = parseNumeric($(row).find('td.seeds').text());
             const leechs = parseNumeric($(row).find('td.leeches').text());
             const sizeText = $(row).find('td.size').text().trim();
@@ -896,7 +973,7 @@ const MUSIC_PROVIDERS = [
 
 async function fetchMusicBrainzArtists(query, limit = 3) {
     try {
-        const response = await axios.get('https://musicbrainz.org/ws/2/artist', {
+        const response = await axios.get('https://musicbrainz.org/ws/2/artist', buildRequestConfig({
             params: {
                 query: `artist:${query}`,
                 limit,
@@ -905,7 +982,7 @@ async function fetchMusicBrainzArtists(query, limit = 3) {
             headers: {
                 'User-Agent': 'TorrentStream/1.0 (https://example.com)'
             }
-        });
+        }));
 
         if (!response.data?.artists) return [];
 
@@ -923,7 +1000,7 @@ async function fetchMusicBrainzArtists(query, limit = 3) {
 
 async function fetchMusicBrainzReleases(artistId, limit = 5) {
     try {
-        const response = await axios.get('https://musicbrainz.org/ws/2/release-group', {
+        const response = await axios.get('https://musicbrainz.org/ws/2/release-group', buildRequestConfig({
             params: {
                 artist: artistId,
                 type: 'album|ep',
@@ -933,7 +1010,7 @@ async function fetchMusicBrainzReleases(artistId, limit = 5) {
             headers: {
                 'User-Agent': 'TorrentStream/1.0 (https://example.com)'
             }
-        });
+        }));
 
         if (!response.data?.['release-groups']) return [];
 

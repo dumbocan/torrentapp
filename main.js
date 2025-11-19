@@ -459,7 +459,7 @@ class TorrentStream {
         }
 
         this.updateSuggestions(filteredResults);
-        this.updateMetadataSuggestions(query);
+        this.updateMetadataSuggestions(this.lastQuery);
         resultsSection.classList.remove('hidden');
         resultsSection.scrollIntoView({ behavior: 'smooth' });
     }
@@ -965,29 +965,52 @@ class TorrentStream {
     }
 
     updateProgress(torrent) {
-        const progress = Math.round(torrent.progress * 100);
-        document.getElementById('progressBar').style.width = `${progress}%`;
-        document.getElementById('progressPercent').textContent = `${progress}%`;
+        const progressBar = document.getElementById('progressBar');
+        const progressPercentLabel = document.getElementById('progressPercent');
+        const progress = Math.round((torrent.progress || 0) * 100);
+        if (progressBar) {
+            progressBar.style.width = `${progress}%`;
+        }
+        if (progressPercentLabel) {
+            progressPercentLabel.textContent = `${progress}%`;
+        }
     }
 
     updateProgressFromBackend(status) {
         const progressPercent = Math.round((status.progress || 0) * 100);
-        document.getElementById('progressBar').style.width = `${progressPercent}%`;
-        document.getElementById('progressPercent').textContent = `${progressPercent}%`;
+        const progressBar = document.getElementById('progressBar');
+        const progressPercentLabel = document.getElementById('progressPercent');
+        if (progressBar) {
+            progressBar.style.width = `${progressPercent}%`;
+        }
+        if (progressPercentLabel) {
+            progressPercentLabel.textContent = `${progressPercent}%`;
+        }
 
         const downloadSpeed = this.formatSpeed(status.downloadSpeed || 0);
         const uploadSpeed = this.formatSpeed(status.uploadSpeed || 0);
 
-        document.getElementById('downloadSpeed').textContent = downloadSpeed;
-        document.getElementById('uploadSpeed').textContent = uploadSpeed;
+        const downloadSpeedLabel = document.getElementById('downloadSpeed');
+        const uploadSpeedLabel = document.getElementById('uploadSpeed');
+        if (downloadSpeedLabel) {
+            downloadSpeedLabel.textContent = downloadSpeed;
+        }
+        if (uploadSpeedLabel) {
+            uploadSpeedLabel.textContent = uploadSpeed;
+        }
     }
 
     updateSpeeds(torrent) {
-        const downloadSpeed = (torrent.downloadSpeed / 1024 / 1024).toFixed(2);
-        const uploadSpeed = (torrent.uploadSpeed / 1024 / 1024).toFixed(2);
-        
-        document.getElementById('downloadSpeed').textContent = `${downloadSpeed} MB/s`;
-        document.getElementById('uploadSpeed').textContent = `${uploadSpeed} MB/s`;
+        const downloadSpeed = this.formatSpeed(torrent.downloadSpeed || 0);
+        const uploadSpeed = this.formatSpeed(torrent.uploadSpeed || 0);
+        const downloadSpeedLabel = document.getElementById('downloadSpeed');
+        const uploadSpeedLabel = document.getElementById('uploadSpeed');
+        if (downloadSpeedLabel) {
+            downloadSpeedLabel.textContent = downloadSpeed;
+        }
+        if (uploadSpeedLabel) {
+            uploadSpeedLabel.textContent = uploadSpeed;
+        }
     }
 
     updateTimeDisplay() {
@@ -1429,36 +1452,3 @@ document.addEventListener('visibilitychange', () => {
         }
     }
 });
-        if (isAlbum && Array.isArray(torrent.tracks)) {
-            playAlbumTrackButtons.forEach(button => {
-                button.addEventListener('click', (event) => {
-                    event.stopPropagation();
-                    const index = Number(event.currentTarget.getAttribute('data-track-index'));
-                    const track = torrent.tracks[index];
-                    if (track) {
-                        this.playLocalTrack(track);
-                    }
-                });
-            });
-            queueAlbumTrackButtons.forEach(button => {
-                button.addEventListener('click', (event) => {
-                    event.stopPropagation();
-                    const index = Number(event.currentTarget.getAttribute('data-track-index'));
-                    const track = torrent.tracks[index];
-                    if (track) {
-                        this.addToQueue(track);
-                    }
-                });
-            });
-        }
-
-        if (toggleTracksButton && trackContainer) {
-            toggleTracksButton.addEventListener('click', (event) => {
-                event.stopPropagation();
-                trackContainer.classList.toggle('hidden');
-                const icon = toggleTracksButton.querySelector('.fa-chevron-down');
-                if (icon) {
-                    icon.classList.toggle('rotate-180');
-                }
-            });
-        }

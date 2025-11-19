@@ -3,8 +3,7 @@ version: '3.8'
 services:
   torrentstream:
     build: .
-    ports:
-      - "3000:3000"
+    network_mode: "host"
     volumes:
       - ./downloads:/app/downloads
       - ./config:/app/config
@@ -13,8 +12,6 @@ services:
       - PORT=3000
       - MAX_DOWNLOADS=5
     restart: unless-stopped
-    networks:
-      - torrentstream-network
 
   # Redis for caching (future use)
   redis:

@@ -105,12 +105,17 @@ PORT=3000
 NODE_ENV=development
 MAX_DOWNLOADS=5
 DOWNLOAD_PATH=./downloads
+# Proxy opcional para scraping (HTTP o SOCKS a través de surfshark, etc.)
+# TORRENT_PROXY_URL=http://usuario:password@127.0.0.1:1080
 ```
 
 ### Configuración del Servidor
 - **Puerto**: Por defecto 3000
 - **Directorio de descargas**: `./downloads/`
 - **Límites**: Configurable en la interfaz de usuario
+
+#### Uso con VPN/Proxy
+Si usas una VPN que expone un proxy local (Surfshark, Mullvad, etc.), define `TORRENT_PROXY_URL`, `HTTPS_PROXY` o `HTTP_PROXY` antes de arrancar el servidor. Todas las peticiones HTTP/HTTPS (Pirate Bay, LimeTorrents, MusicBrainz, etc.) saldrán por ese proxy y aceptarán certificados autofirmados para evitar bloqueos de inspección TLS.
 
 ## 🔧 API Endpoints
 
