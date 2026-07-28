@@ -7,6 +7,7 @@ import fs from 'fs';
 import https from 'https';
 import dns from 'dns';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import pg from 'pg';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import * as cheerio from 'cheerio';
@@ -47,6 +48,8 @@ const X1337_MIRRORS = [
 const AUDIO_EXTENSION_SET = new Set(AUDIO_EXTENSIONS);
 const LIBRARY_CACHE = { entries: [], lastScan: 0, version: 0 };
 const LIBRARY_SCAN_INTERVAL = 60 * 1000;
+const TRACK_INDEX = new Map(); // índice en memoria: pista canónica -> mejor magnet y candidatos
+const TRACK_STATS = new Map(); // métricas básicas por pista
 const SCRAPER_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36',
     'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
@@ -82,8 +85,22 @@ const DEFAULT_TRACKERS = [
     'udp://tracker.coppersurfer.tk:6969/announce',
     'udp://tracker.leechers-paradise.org:6969/announce'
 ];
+const PREBUFFER_TARGET_BYTES = parseInt(process.env.PREBUFFER_TARGET_BYTES, 10) || (3 * 1024 * 1024); // ~1 min a 320kbps
+const STREAM_CONNECT_TIMEOUT_MS = parseInt(process.env.STREAM_CONNECT_TIMEOUT_MS, 10) || 8000;
+const MAX_STREAM_ALTERNATIVES = 3;
 const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
 const REQUEST_TIMEOUT = 15000;
+const DB_DISABLED = process.env.DB_DISABLED === 'true';
+const DB_CONFIG = {
+    connectionString: process.env.DATABASE_URL || undefined,
+    host: process.env.PGHOST || '127.0.0.1',
+    port: parseInt(process.env.PGPORT, 10) || 5432,
+    user: process.env.PGUSER || 'torrentstream',
+    password: process.env.PGPASSWORD || 'your_password_here',
+    database: process.env.PGDATABASE || 'torrentstream',
+    max: parseInt(process.env.PGPOOL_SIZE, 10) || 5,
+    ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : undefined
+};
 
 if (PROXY_URL) {
     console.log(`🌐 Proxy HTTP configurado para scrapers: ${PROXY_URL}`);
@@ -105,6 +122,297 @@ function buildRequestConfig(overrides = {}) {
         ...rest,
         headers: { ...baseHeaders, ...(headers || {}) }
     };
+}
+
+function pushSearchLog(logs, message, extra = {}) {
+    if (!Array.isArray(logs)) return;
+    logs.push({
+        message,
+        ...extra,
+        timestamp: Date.now()
+    });
+}
+
+let dbPoolPromise = null;
+async function initializeDatabasePool() {
+    if (DB_DISABLED) {
+        return null;
+    }
+    try {
+        const pool = new pg.Pool(DB_CONFIG);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS search_cache (
+                cache_key TEXT PRIMARY KEY,
+                info_hash TEXT,
+                name TEXT,
+                normalized_name TEXT,
+                tokens TEXT[],
+                source TEXT,
+                seeds INTEGER,
+                leechs INTEGER,
+                magnet TEXT,
+                size_label TEXT,
+                quality TEXT,
+                description TEXT,
+                data JSONB,
+                last_seen TIMESTAMPTZ DEFAULT NOW(),
+                last_query TEXT
+            )
+        `);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_search_cache_last_seen ON search_cache (last_seen DESC)`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_search_cache_tokens ON search_cache USING gin (tokens)`);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS library_tracks (
+                id TEXT PRIMARY KEY,
+                album TEXT,
+                artist TEXT,
+                name TEXT,
+                normalized_name TEXT,
+                keywords TEXT[],
+                bytes BIGINT,
+                added_at TIMESTAMPTZ,
+                description TEXT,
+                data JSONB
+            )
+        `);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_library_tracks_album ON library_tracks (album, artist)`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_library_tracks_name ON library_tracks USING gin (to_tsvector('simple', normalized_name))`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_library_tracks_keywords ON library_tracks USING gin (keywords)`);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS track_index (
+                key TEXT PRIMARY KEY,
+                artist TEXT,
+                title TEXT,
+                album TEXT,
+                best JSONB,
+                alternatives JSONB,
+                indexed_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_track_index_artist_title ON track_index (artist, title)`);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS track_stats (
+                key TEXT PRIMARY KEY,
+                plays INTEGER DEFAULT 0,
+                successes INTEGER DEFAULT 0,
+                fallbacks INTEGER DEFAULT 0,
+                last_play TIMESTAMPTZ
+            )
+        `);
+        console.log('✅ Base de datos inicializada');
+        return pool;
+    } catch (error) {
+        console.warn('⚠️ Base de datos deshabilitada: ', error.message);
+        return null;
+    }
+}
+
+function getDbPool() {
+    if (!dbPoolPromise) {
+        dbPoolPromise = initializeDatabasePool();
+    }
+    return dbPoolPromise;
+}
+
+function buildCacheKey(entry = {}) {
+    return entry.infoHash ||
+        entry.magnet ||
+        entry.downloadUrl ||
+        `${normalizeText(entry.name || '')}-${entry.source || 'remote'}`;
+}
+
+async function cacheSearchResults(results = [], query = '') {
+    if (!Array.isArray(results) || !results.length) return;
+    const pool = await getDbPool();
+    if (!pool) return;
+    const client = await pool.connect();
+    try {
+        const normalizedQuery = normalizeText(query || '');
+        for (const entry of results) {
+            if (!entry || entry.isLocal) continue;
+            const cacheKey = buildCacheKey(entry);
+            if (!cacheKey) continue;
+            const normalizedName = normalizeText(entry.name || '');
+            const tokens = buildFilterTokens(entry.name || '').slice(0, 16);
+            await client.query(`
+                INSERT INTO search_cache (
+                    cache_key, info_hash, name, normalized_name, tokens,
+                    source, seeds, leechs, magnet, size_label, quality,
+                    description, data, last_seen, last_query
+                )
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),$14)
+                ON CONFLICT (cache_key) DO UPDATE SET
+                    info_hash = EXCLUDED.info_hash,
+                    name = EXCLUDED.name,
+                    normalized_name = EXCLUDED.normalized_name,
+                    tokens = EXCLUDED.tokens,
+                    source = EXCLUDED.source,
+                    seeds = EXCLUDED.seeds,
+                    leechs = EXCLUDED.leechs,
+                    magnet = EXCLUDED.magnet,
+                    size_label = EXCLUDED.size_label,
+                    quality = EXCLUDED.quality,
+                    description = EXCLUDED.description,
+                    data = EXCLUDED.data,
+                    last_seen = NOW(),
+                    last_query = EXCLUDED.last_query;
+            `, [
+                cacheKey,
+                entry.infoHash || null,
+                entry.name || null,
+                normalizedName,
+                tokens,
+                entry.source || null,
+                entry.seeds || 0,
+                entry.leechs || 0,
+                entry.magnet || null,
+                entry.size || null,
+                entry.quality || null,
+                entry.description || null,
+                JSON.stringify(entry),
+                normalizedQuery
+            ]);
+        }
+    } catch (error) {
+        console.warn('⚠️ Error guardando resultados en cache:', error.message);
+    } finally {
+        client.release();
+    }
+}
+
+async function getCachedResults(query, limit = 15) {
+    const pool = await getDbPool();
+    if (!pool) return [];
+    const normalizedQuery = normalizeText(query || '');
+    const likePattern = `%${normalizedQuery}%`;
+    const tokens = buildFilterTokens(query || '');
+    const values = [likePattern];
+    let condition = 'normalized_name LIKE $1';
+    if (tokens.length) {
+        condition += ' OR tokens && $2';
+        values.push(tokens);
+    }
+    values.push(limit);
+    const sql = `
+        SELECT data
+        FROM search_cache
+        WHERE ${condition}
+        ORDER BY last_seen DESC
+        LIMIT $${values.length}
+    `;
+    try {
+        const result = await pool.query(sql, values);
+        return result.rows.map(row => ({ ...row.data, fromCache: true }));
+    } catch (error) {
+        console.warn('⚠️ Error consultando cache:', error.message);
+        return [];
+    }
+}
+
+async function persistLibraryEntries(entries = []) {
+    if (!Array.isArray(entries) || !entries.length) return;
+    const pool = await getDbPool();
+    if (!pool) return;
+    const client = await pool.connect();
+    try {
+        for (const entry of entries) {
+            if (!entry?.id) continue;
+            const normalizedName = normalizeText(entry.name || entry.originalName || '');
+            const keywords = Array.isArray(entry.keywords) && entry.keywords.length
+                ? entry.keywords
+                : buildFilterTokens(entry.name || '');
+            await client.query(`
+                INSERT INTO library_tracks (
+                    id, album, artist, name, normalized_name, keywords,
+                    bytes, added_at, description, data
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,TO_TIMESTAMP($8/1000.0),$9,$10)
+                ON CONFLICT (id) DO UPDATE SET
+                    album = EXCLUDED.album,
+                    artist = EXCLUDED.artist,
+                    name = EXCLUDED.name,
+                    normalized_name = EXCLUDED.normalized_name,
+                    keywords = EXCLUDED.keywords,
+                    bytes = EXCLUDED.bytes,
+                    added_at = EXCLUDED.added_at,
+                    description = EXCLUDED.description,
+                    data = EXCLUDED.data;
+            `, [
+                entry.id,
+                entry.album || null,
+                entry.artist || null,
+                entry.name || entry.originalName || null,
+                normalizedName,
+                keywords,
+                entry.bytes || 0,
+                entry.addedAt || Date.now(),
+                entry.description || null,
+                JSON.stringify({ ...entry, isLocal: true })
+            ]);
+        }
+    } catch (error) {
+        console.warn('⚠️ Error actualizando biblioteca en BD:', error.message);
+    } finally {
+        client.release();
+    }
+}
+
+async function searchLibraryDb(query, limit = 15, mode = 'tracks') {
+    const pool = await getDbPool();
+    if (!pool) return [];
+    const normalizedQuery = normalizeText(query || '');
+    const tokens = buildFilterTokens(query || '');
+    const whereParts = [];
+    const values = [];
+    if (normalizedQuery) {
+        values.push(`%${normalizedQuery}%`);
+        whereParts.push(`normalized_name LIKE $${values.length}`);
+    }
+    if (tokens.length) {
+        values.push(tokens);
+        whereParts.push(`keywords && $${values.length}`);
+    }
+    const whereClause = whereParts.length ? whereParts.join(' OR ') : '1=1';
+    values.push(limit);
+    if (mode === 'albums') {
+        const sql = `
+            SELECT album, artist, json_agg(data ORDER BY data->>'name') AS tracks,
+                   MAX(added_at) AS latest,
+                   SUM(bytes) AS total_bytes
+            FROM library_tracks
+            WHERE ${whereClause}
+            GROUP BY album, artist
+            ORDER BY latest DESC
+            LIMIT $${values.length}
+        `;
+        const result = await pool.query(sql, values);
+        return result.rows.map(row => {
+            const tracks = row.tracks || [];
+            return {
+                id: `${row.artist || 'Desconocido'}::${row.album || 'Colección'}`,
+                name: row.album || tracks[0]?.name || 'Álbum sin título',
+                artist: row.artist || tracks[0]?.artist || 'Desconocido',
+                category: 'library-album',
+                type: 'album',
+                isLocal: true,
+                trackCount: tracks.length,
+                tracks,
+                size: formatBytes(Number(row.total_bytes) || 0),
+                bytes: Number(row.total_bytes) || 0,
+                description: `Álbum local con ${tracks.length} pistas`,
+                source: 'Biblioteca',
+                addedAt: row.latest ? new Date(row.latest).getTime() : Date.now()
+            };
+        });
+    }
+    const sql = `
+        SELECT data
+        FROM library_tracks
+        WHERE ${whereClause}
+        ORDER BY added_at DESC
+        LIMIT $${values.length}
+    `;
+    const result = await pool.query(sql, values);
+    return result.rows.map(row => ({ ...row.data, isLocal: true, source: 'Biblioteca' }));
 }
 
 if (!fs.existsSync(DOWNLOADS_DIR)) {
@@ -190,6 +498,72 @@ function formatBytes(bytes) {
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), sizes.length - 1);
     return `${(bytes / Math.pow(1024, index)).toFixed(2)} ${sizes[index]}`;
+}
+
+function parseSizeToBytes(label = '') {
+    if (!label || typeof label !== 'string') return 0;
+    const match = label.match(/([\d.,]+)\s*(b|kb|mb|gb|tb)/i);
+    if (!match) return 0;
+    const value = parseFloat(match[1].replace(/,/g, ''));
+    if (!Number.isFinite(value)) return 0;
+    const unit = match[2].toLowerCase();
+    const multipliers = { b: 1, kb: 1024, mb: 1024 ** 2, gb: 1024 ** 3, tb: 1024 ** 4 };
+    return Math.round(value * (multipliers[unit] || 1));
+}
+
+function canonicalizeTrackMeta(data = {}) {
+    const artist = (data.artist || '').trim();
+    const title = (data.title || data.name || '').trim();
+    const album = (data.album || '').trim();
+    return { artist, title, album, query: [artist, title, album].filter(Boolean).join(' ') };
+}
+
+function buildTrackKey({ artist = '', title = '', album = '' }) {
+    const normalized = [artist, title, album].map(value => normalizeText(value || '').replace(/\s+/g, ' ').trim());
+    return normalized.join('::');
+}
+
+function scoreTorrentForTrack(trackMeta, torrent = {}) {
+    const tokens = buildFilterTokens(`${trackMeta.artist} ${trackMeta.title} ${trackMeta.album || ''}`);
+    const normalizedName = normalizeText(torrent.name || '');
+    const matchedTokens = tokens.filter(token => normalizedName.includes(token));
+    const hasAlbum = trackMeta.album ? normalizedName.includes(normalizeText(trackMeta.album)) : false;
+    const penaltyDiscography = /discografia|discography|complete|collection|full\s*album/.test(normalizedName) ? -8 : 0;
+    const wordCountPenalty = Math.max(0, normalizedName.split(/\s+/).length - 14) * 0.5;
+    const sizeBytes = parseSizeToBytes(torrent.size || torrent.size_label || torrent.sizeLabel || '');
+    // Pistas sueltas suelen estar entre ~2MB y ~20MB. Más allá es sospechoso de álbum/compilación.
+    let sizeScore = 0;
+    if (sizeBytes) {
+        if (sizeBytes < 800_000) sizeScore = -6;
+        else if (sizeBytes <= 22 * 1024 * 1024) sizeScore = 4;
+        else if (sizeBytes <= 60 * 1024 * 1024) sizeScore = 1;
+        else if (sizeBytes <= 120 * 1024 * 1024) sizeScore = -3;
+        else sizeScore = -8; // Muy grande: casi seguro álbum
+    }
+    const seedsScore = Math.log2((torrent.seeds || 0) + 1) * 3;
+    const qualityScore = torrent.quality === 'FLAC' ? 4 : torrent.quality?.includes('320') ? 3 : 1;
+    const nameScore = matchedTokens.length * 5 + (hasAlbum ? 2 : 0);
+    return seedsScore + qualityScore + nameScore + sizeScore + penaltyDiscography - wordCountPenalty;
+}
+
+function pickBestTorrentForTrack(trackMeta, results = []) {
+    const scored = results
+        .map(item => ({ item, score: scoreTorrentForTrack(trackMeta, item) }))
+        .filter(entry => entry.score > 0 && isLikelyAudioRelease(entry.item.name || ''))
+        .filter(entry => {
+            const sizeBytes = parseSizeToBytes(entry.item.size || entry.item.size_label || entry.item.sizeLabel || '');
+            return !sizeBytes || sizeBytes <= 200 * 1024 * 1024; // descartar tamaños masivos (álbum compilado)
+        });
+
+    if (!scored.length) {
+        return { best: null, candidates: [] };
+    }
+
+    const candidates = scored
+        .sort((a, b) => b.score - a.score || (b.item.seeds || 0) - (a.item.seeds || 0))
+        .map(entry => ({ ...entry.item, score: entry.score }));
+
+    return { best: candidates[0], candidates };
 }
 
 function parseNumeric(value) {
@@ -375,6 +749,7 @@ function scanLibrary(force = false) {
         LIBRARY_CACHE.entries = entries;
         LIBRARY_CACHE.lastScan = now;
         LIBRARY_CACHE.version = now;
+        persistLibraryEntries(entries).catch(() => {});
     } catch (error) {
         console.warn('⚠️ Error escaneando biblioteca local:', error.message);
     }
@@ -382,7 +757,15 @@ function scanLibrary(force = false) {
     return LIBRARY_CACHE;
 }
 
-function searchLibraryTracks(query, limit = 15, mode = 'tracks') {
+async function searchLibraryTracks(query, limit = 15, mode = 'tracks') {
+    const dbResults = await searchLibraryDb(query, limit, mode);
+    if (dbResults && dbResults.length) {
+        return dbResults;
+    }
+    return searchLibraryTracksLocal(query, limit, mode);
+}
+
+function searchLibraryTracksLocal(query, limit = 15, mode = 'tracks') {
     const cache = scanLibrary();
     const normalizedQuery = normalizeText(query).replace(/\s+/g, ' ').trim();
     const condensedQuery = normalizedQuery.replace(/\s+/g, '');
@@ -1026,17 +1409,64 @@ async function fetchMusicBrainzReleases(artistId, limit = 5) {
     }
 }
 
+async function fetchMusicBrainzReleaseWithTracks(artistName, albumTitle) {
+    try {
+        const response = await axios.get('https://musicbrainz.org/ws/2/release', buildRequestConfig({
+            params: {
+                query: `artist:"${artistName}" AND release:"${albumTitle}"`,
+                fmt: 'json',
+                limit: 5,
+                inc: 'recordings'
+            },
+            headers: {
+                'User-Agent': 'TorrentStream/1.0 (https://example.com)'
+            }
+        }));
+
+        const releases = response.data?.releases || [];
+        if (!releases.length) return [];
+
+        // Elegimos la primera con tracklist disponible
+        const withTracks = releases.find(r => Array.isArray(r.media) && r.media.some(m => Array.isArray(m.tracks)));
+        if (!withTracks) return [];
+
+        const tracks = [];
+        withTracks.media.forEach(media => {
+            if (!Array.isArray(media.tracks)) return;
+            media.tracks.forEach(track => {
+                const title = track.title || '';
+                if (!title) return;
+                tracks.push({
+                    position: track.position,
+                    title: track.title,
+                    length: track.length || null,
+                    artist: artistName,
+                    album: albumTitle
+                });
+            });
+        });
+
+        return tracks;
+    } catch (error) {
+        console.warn('⚠️ MusicBrainz release-with-tracks failed:', error.message);
+        return [];
+    }
+}
+
 async function searchAllMusicSources(query, limit = 15, options = {}) {
-    const { mode = 'tracks' } = options;
+    const { mode = 'tracks', logEvents = null } = options;
     const providerPromises = MUSIC_PROVIDERS.map(async ({ name, handler }) => {
         try {
+            pushSearchLog(logEvents, `Consultando ${name}`, { provider: name, phase: 'start' });
             const providerResults = await handler(query, limit, { mode, originalQuery: query });
+            pushSearchLog(logEvents, `${name} devolvió ${providerResults.length} resultados`, { provider: name, phase: 'complete', results: providerResults.length });
             return providerResults.map(result => ({
                 ...result,
                 source: result.source || name
             }));
         } catch (error) {
             console.warn(`⚠️ ${name} búsqueda falló: ${error.message}`);
+            pushSearchLog(logEvents, `${name} falló: ${error.message}`, { provider: name, phase: 'error' });
             return [];
         }
     });
@@ -1068,9 +1498,13 @@ async function searchAllMusicSources(query, limit = 15, options = {}) {
             return (result.seeds || 0) > 0;
         });
 
-    return filtered
+    const finalResults = filtered
         .sort((a, b) => (b.seeds || 0) - (a.seeds || 0))
         .slice(0, limit);
+
+    pushSearchLog(logEvents, `Trackers agregados: ${finalResults.length} resultados`, { phase: 'aggregate', results: finalResults.length });
+    cacheSearchResults(finalResults, query).catch(() => {});
+    return finalResults;
 }
 
 async function expandQueriesWithMetadata(query) {
@@ -1080,6 +1514,135 @@ async function expandQueriesWithMetadata(query) {
         .map(artist => artist.name)
         .filter(name => normalizeText(name) !== normalizeText(query));
     return Array.from(new Set(canonicalNames));
+}
+
+async function persistTrackIndexEntry(entry) {
+    const pool = await getDbPool();
+    if (!pool || !entry?.key) return;
+    try {
+        await pool.query(`
+            INSERT INTO track_index (key, artist, title, album, best, alternatives, indexed_at)
+            VALUES ($1,$2,$3,$4,$5,$6,TO_TIMESTAMP($7/1000.0))
+            ON CONFLICT (key) DO UPDATE SET
+                artist = EXCLUDED.artist,
+                title = EXCLUDED.title,
+                album = EXCLUDED.album,
+                best = EXCLUDED.best,
+                alternatives = EXCLUDED.alternatives,
+                indexed_at = EXCLUDED.indexed_at
+        `, [
+            entry.key,
+            entry.track?.artist || null,
+            entry.track?.title || null,
+            entry.track?.album || null,
+            entry.best ? JSON.stringify(entry.best) : null,
+            entry.alternatives ? JSON.stringify(entry.alternatives) : null,
+            entry.indexedAt || Date.now()
+        ]);
+    } catch (error) {
+        console.warn('⚠️ Error guardando track_index:', error.message);
+    }
+}
+
+async function readTrackIndexEntry(key) {
+    const pool = await getDbPool();
+    if (!pool || !key) return null;
+    try {
+        const result = await pool.query(`SELECT * FROM track_index WHERE key = $1`, [key]);
+        if (!result.rows.length) return null;
+        const row = result.rows[0];
+        return {
+            key: row.key,
+            track: { artist: row.artist, title: row.title, album: row.album },
+            best: row.best,
+            alternatives: row.alternatives || [],
+            indexedAt: row.indexed_at ? new Date(row.indexed_at).getTime() : Date.now()
+        };
+    } catch (error) {
+        console.warn('⚠️ Error leyendo track_index:', error.message);
+        return null;
+    }
+}
+
+async function persistTrackStats(key, payload) {
+    const pool = await getDbPool();
+    if (!pool || !key) return;
+    try {
+        await pool.query(`
+            INSERT INTO track_stats (key, plays, successes, fallbacks, last_play)
+            VALUES ($1,$2,$3,$4,TO_TIMESTAMP($5/1000.0))
+            ON CONFLICT (key) DO UPDATE SET
+                plays = track_stats.plays + EXCLUDED.plays,
+                successes = track_stats.successes + EXCLUDED.successes,
+                fallbacks = track_stats.fallbacks + EXCLUDED.fallbacks,
+                last_play = GREATEST(track_stats.last_play, EXCLUDED.last_play)
+        `, [
+            key,
+            payload.plays || 0,
+            payload.successes || 0,
+            payload.fallbacks || 0,
+            payload.last_play || Date.now()
+        ]);
+    } catch (error) {
+        console.warn('⚠️ Error guardando track_stats:', error.message);
+    }
+}
+
+function bumpTrackStat(key, field, delta = 1) {
+    if (!key || !field) return;
+    const current = TRACK_STATS.get(key) || { plays: 0, successes: 0, fallbacks: 0 };
+    current[field] = (current[field] || 0) + delta;
+    current.last_play = Date.now();
+    TRACK_STATS.set(key, current);
+    persistTrackStats(key, { [field]: delta, last_play: current.last_play }).catch(() => {});
+}
+
+function getTrackStats(key) {
+    return TRACK_STATS.get(key) || { plays: 0, successes: 0, fallbacks: 0 };
+}
+
+async function readTrackStats(key) {
+    const pool = await getDbPool();
+    if (!pool || !key) return null;
+    try {
+        const result = await pool.query(`SELECT plays, successes, fallbacks, last_play FROM track_stats WHERE key = $1`, [key]);
+        if (!result.rows.length) return null;
+        return {
+            plays: result.rows[0].plays || 0,
+            successes: result.rows[0].successes || 0,
+            fallbacks: result.rows[0].fallbacks || 0,
+            last_play: result.rows[0].last_play ? new Date(result.rows[0].last_play).getTime() : null
+        };
+    } catch (error) {
+        console.warn('⚠️ Error leyendo track_stats:', error.message);
+        return null;
+    }
+}
+
+async function indexTrackWithTorrents(trackMeta = {}, limit = 15) {
+    const canonical = canonicalizeTrackMeta(trackMeta);
+    if (!canonical.artist || !canonical.title) {
+        return { error: 'Artist and title are required' };
+    }
+
+    const searchQuery = canonical.query;
+    const results = await searchAllMusicSources(searchQuery, limit, { mode: 'tracks', originalQuery: searchQuery });
+    const { best, candidates } = pickBestTorrentForTrack(canonical, results);
+    if (!best) {
+        return { error: 'No suitable torrents found', candidates };
+    }
+
+    const key = buildTrackKey(canonical);
+    const payload = {
+        key,
+        track: canonical,
+        best,
+        alternatives: candidates,
+        indexedAt: Date.now()
+    };
+    TRACK_INDEX.set(key, payload);
+    persistTrackIndexEntry(payload).catch(() => {});
+    return payload;
 }
 
 // ==================== BIBLIOTECA LOCAL ====================
@@ -1102,10 +1665,12 @@ app.post('/api/library/rescan', (req, res) => {
     });
 });
 
-app.get('/api/library/search', (req, res) => {
+app.get('/api/library/search', async (req, res) => {
     const query = req.query.q || req.query.query || '';
     const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
-    const matches = query ? searchLibraryTracks(query, limit) : scanLibrary().entries.slice(0, limit);
+    const matches = query
+        ? await searchLibraryTracks(query, limit)
+        : scanLibrary().entries.slice(0, limit);
     res.json({
         tracks: matches,
         total: matches.length
@@ -1180,6 +1745,122 @@ app.get('/api/metadata/artist', async (req, res) => {
     }
 });
 
+// Índice canónico por pista (pista -> mejor magnet + alternativas)
+app.post('/api/index/track', async (req, res) => {
+    try {
+        const { artist = '', title = '', album = '', limit } = req.body || {};
+        const maxResults = Math.min(parseInt(limit, 10) || 15, 30);
+        if (!artist.trim() || !title.trim()) {
+            return res.status(400).json({ error: 'Artist and title are required' });
+        }
+        const result = await indexTrackWithTorrents({ artist, title, album }, maxResults);
+        if (result.error) {
+            return res.status(404).json(result);
+        }
+        res.json(result);
+    } catch (error) {
+        console.error('Track index error:', error.message);
+        res.status(500).json({ error: 'Failed to index track' });
+    }
+});
+
+app.get('/api/index/track', (req, res) => {
+    const key = req.query.key
+        ? String(req.query.key).trim()
+        : buildTrackKey({
+            artist: String(req.query.artist || '').trim(),
+            title: String(req.query.title || '').trim(),
+            album: String(req.query.album || '').trim()
+        });
+    if (!key) {
+        return res.status(400).json({ error: 'key or artist/title params required' });
+    }
+    const cached = TRACK_INDEX.get(key);
+    if (cached) {
+        return res.json(cached);
+    }
+    readTrackIndexEntry(key)
+        .then((dbPayload) => {
+            if (!dbPayload) {
+                return res.status(404).json({ error: 'Track not indexed yet' });
+            }
+            TRACK_INDEX.set(key, dbPayload);
+            return res.json(dbPayload);
+        })
+        .catch(() => res.status(500).json({ error: 'Failed to read track index' }));
+});
+
+// Indexar todas las pistas de un álbum usando MusicBrainz
+app.post('/api/index/album', async (req, res) => {
+    try {
+        const { artist = '', album = '', limitPerTrack } = req.body || {};
+        if (!artist.trim() || !album.trim()) {
+            return res.status(400).json({ error: 'Artist and album are required' });
+        }
+        const tracks = await fetchMusicBrainzReleaseWithTracks(artist, album);
+        if (!tracks.length) {
+            return res.status(404).json({ error: 'No tracks found in MusicBrainz for this album' });
+        }
+
+        const results = [];
+        for (const track of tracks) {
+            const indexed = await indexTrackWithTorrents(
+                { artist: track.artist, title: track.title, album },
+                Math.min(parseInt(limitPerTrack, 10) || 15, 30)
+            );
+            results.push({ track: track.title, status: indexed.error ? 'failed' : 'ok', data: indexed });
+        }
+
+        res.json({
+            artist,
+            album,
+            totalTracks: tracks.length,
+            indexed: results
+        });
+    } catch (error) {
+        console.error('Album index error:', error.message);
+        res.status(500).json({ error: 'Failed to index album' });
+    }
+});
+
+// Resolver pista para reproducir: devuelve mejor magnet + alternativas, indexando si falta
+app.post('/api/resolve/track', async (req, res) => {
+    try {
+        const { artist = '', title = '', album = '', limit } = req.body || {};
+        if (!artist.trim() || !title.trim()) {
+            return res.status(400).json({ error: 'Artist and title are required' });
+        }
+        const key = buildTrackKey({ artist, title, album });
+        let payload = TRACK_INDEX.get(key) || await readTrackIndexEntry(key);
+        if (!payload) {
+            payload = await indexTrackWithTorrents({ artist, title, album }, Math.min(parseInt(limit, 10) || 15, 30));
+            if (payload.error) {
+                return res.status(404).json(payload);
+            }
+        } else if (!TRACK_INDEX.has(key)) {
+            TRACK_INDEX.set(key, payload);
+        }
+
+        bumpTrackStat(key, 'plays', 1);
+        const dbStats = await readTrackStats(key);
+        const mergedStats = dbStats
+            ? {
+                plays: (dbStats.plays || 0) + getTrackStats(key).plays,
+                successes: (dbStats.successes || 0) + getTrackStats(key).successes,
+                fallbacks: (dbStats.fallbacks || 0) + getTrackStats(key).fallbacks,
+                last_play: getTrackStats(key).last_play || dbStats.last_play || null
+            }
+            : getTrackStats(key);
+        res.json({
+            ...payload,
+            stats: mergedStats
+        });
+    } catch (error) {
+        console.error('Resolve track error:', error.message);
+        res.status(500).json({ error: 'Failed to resolve track' });
+    }
+});
+
 // Endpoint de búsqueda para música
 app.get('/api/search', async (req, res) => {
     try {
@@ -1189,9 +1870,22 @@ app.get('/api/search', async (req, res) => {
         }
         const limit = Math.min(parseInt(req.query.limit, 10) || 15, 30);
         const mode = typeof req.query.mode === 'string' ? req.query.mode : 'tracks';
+        const includeLocal = req.query.includeLocal !== 'false';
+        const debugLog = [];
+        pushSearchLog(debugLog, `Búsqueda iniciada: "${query}"`, { phase: 'start' });
         const queryCandidates = [query, ...await expandQueriesWithMetadata(query)];
         const seenQueries = new Set();
         const aggregated = new Map();
+        if (req.query.useCache !== 'false') {
+            const cachedHits = await getCachedResults(query, limit);
+            pushSearchLog(debugLog, `Cache local: ${cachedHits.length} resultados recientes`, { phase: 'cache', results: cachedHits.length });
+            cachedHits.forEach(item => {
+                const key = item.infoHash || item.cache_key || `${normalizeText(item.name || '')}-${item.source || 'cache'}`;
+                if (!aggregated.has(key)) {
+                    aggregated.set(key, { ...item, matchedQuery: query, fromCache: true });
+                }
+            });
+        }
 
         for (const candidate of queryCandidates) {
             const normalizedCandidate = normalizeText(candidate);
@@ -1200,39 +1894,59 @@ app.get('/api/search', async (req, res) => {
             }
             seenQueries.add(normalizedCandidate);
 
-            const localRaw = searchLibraryTracks(candidate, limit, mode);
-            const localResults = mode === 'albums'
-                ? groupLibraryTracksByAlbum(localRaw, limit)
-                : localRaw;
+            if (includeLocal) {
+                pushSearchLog(debugLog, `Buscando en biblioteca local para "${candidate}"`, { phase: 'local' });
+                const localResults = await searchLibraryTracks(candidate, limit, mode);
 
-            localResults.forEach(item => {
-                const key = item.id || item.infoHash || `${normalizeText(item.name || '')}-${item.source || 'library'}`;
-                if (!aggregated.has(key)) {
-                    aggregated.set(key, { ...item, matchedQuery: candidate });
-                }
-            });
+                localResults.forEach(item => {
+                    const key = item.id || item.infoHash || `${normalizeText(item.name || '')}-${item.source || 'library'}`;
+                    if (!aggregated.has(key)) {
+                        aggregated.set(key, { ...item, matchedQuery: candidate });
+                    }
+                });
+                pushSearchLog(debugLog, `Biblioteca añadió ${localResults.length} resultados`, { phase: 'local', results: localResults.length });
 
-            if (aggregated.size >= limit) break;
+                if (aggregated.size >= limit) break;
+            }
 
             const remainingSlots = Math.max(limit - aggregated.size, 0);
             if (remainingSlots > 0) {
-                const remoteResults = await searchAllMusicSources(candidate, remainingSlots, { mode, originalQuery: candidate });
+                pushSearchLog(debugLog, `Buscando en trackers para "${candidate}"`, { phase: 'remote' });
+                const remoteResults = await searchAllMusicSources(candidate, remainingSlots, { mode, originalQuery: candidate, logEvents: debugLog });
                 remoteResults.forEach(item => {
                     const key = item.infoHash || `${normalizeText(item.name || '')}-${item.source || 'remote'}`;
                     if (!aggregated.has(key)) {
                         aggregated.set(key, { ...item, matchedQuery: candidate });
                     }
                 });
+                pushSearchLog(debugLog, `Trackers añadieron ${remoteResults.length} resultados`, { phase: 'remote', results: remoteResults.length });
             }
 
             if (aggregated.size >= limit) break;
         }
 
-        res.json(Array.from(aggregated.values()).slice(0, limit));
-        
+        const finalResults = Array.from(aggregated.values()).slice(0, limit);
+        pushSearchLog(debugLog, `Búsqueda completada con ${finalResults.length} resultados`, { phase: 'complete', results: finalResults.length });
+        res.json({ results: finalResults, logs: debugLog });
+
     } catch (error) {
         console.error('Search error:', error.message);
         res.status(500).json({ error: 'Search failed', details: error.message });
+    }
+});
+
+app.get('/api/search/cache', async (req, res) => {
+    try {
+        const query = req.query.q || req.query.query || '';
+        if (!query) {
+            return res.status(400).json({ error: 'Query parameter required' });
+        }
+        const limit = Math.min(parseInt(req.query.limit, 10) || 30, 100);
+        const cached = await getCachedResults(query, limit);
+        res.json({ results: cached });
+    } catch (error) {
+        console.error('Cache search error:', error.message);
+        res.status(500).json({ error: 'Cache lookup failed', details: error.message });
     }
 });
 
@@ -1254,6 +1968,98 @@ function ensureTorrentMetadata(torrentId) {
     return data;
 }
 
+function prefetchStreamable(torrentId) {
+    const data = ensureTorrentMetadata(torrentId);
+    if (!data || data.streamableFileIndex === null || data.streamableFileIndex === undefined) {
+        return;
+    }
+    const file = data.torrent.files[data.streamableFileIndex];
+    if (!file || typeof file.select !== 'function') {
+        return;
+    }
+    // Solicitar las primeras piezas del archivo para tener ~1 min de buffer
+    const start = 0;
+    const end = Math.min(file.length - 1, PREBUFFER_TARGET_BYTES);
+    try {
+        file.select(start, end);
+        data.prefetching = true;
+        activeTorrents.set(torrentId, data);
+    } catch (error) {
+        console.warn('⚠️ Prefetch error:', error.message);
+    }
+}
+
+function scheduleConnectTimeout(torrentId) {
+    const data = activeTorrents.get(torrentId);
+    if (!data || data.connectTimer || !STREAM_CONNECT_TIMEOUT_MS) return;
+    data.connectTimer = setTimeout(() => {
+        const current = activeTorrents.get(torrentId);
+            if (!current) return;
+            const { torrent, alternatives = [] } = current;
+            const connected = torrent?.ready || (torrent?.downloaded || 0) > 0 || (torrent?.numPeers || 0) > 0;
+            if (connected) return;
+            const nextMagnet = alternatives.shift();
+            if (!nextMagnet) return;
+            console.warn('⚠️ Torrent lento, probando alternativa');
+            current.fallbacksTried = (current.fallbacksTried || 0) + 1;
+            if (current.trackKey) {
+                bumpTrackStat(current.trackKey, 'fallbacks', 1);
+            }
+            activeTorrents.set(torrentId, current);
+            try {
+                torrent?.destroy(() => {
+                    const newTorrent = client.add(nextMagnet, { path: DOWNLOADS_DIR });
+                    current.torrent = newTorrent;
+                current.name = 'Cargando...';
+                current.connectTimer = null;
+                activeTorrents.set(torrentId, current);
+                attachTorrentEvents(torrentId);
+                scheduleConnectTimeout(torrentId);
+            });
+        } catch (error) {
+            console.error('Fallback error:', error.message);
+        }
+    }, STREAM_CONNECT_TIMEOUT_MS);
+    activeTorrents.set(torrentId, data);
+}
+
+function attachTorrentEvents(torrentId) {
+    const data = activeTorrents.get(torrentId);
+    if (!data) return;
+    const torrent = data.torrent;
+    if (!torrent) return;
+
+    torrent.once('error', (err) => {
+        console.error('Torrent error:', err.message);
+        activeTorrents.delete(torrentId);
+    });
+
+    torrent.once('metadata', () => {
+        const stored = activeTorrents.get(torrentId);
+        if (!stored) return;
+        stored.name = torrent.name || stored.name;
+        activeTorrents.set(torrentId, stored);
+    });
+
+    torrent.once('ready', () => {
+        const stored = ensureTorrentMetadata(torrentId);
+        if (!stored) return;
+        if (stored.connectTimer) {
+            clearTimeout(stored.connectTimer);
+            stored.connectTimer = null;
+        }
+        prefetchStreamable(torrentId);
+        if (stored.trackKey) {
+            bumpTrackStat(stored.trackKey, 'successes', 1);
+        }
+    });
+
+    torrent.on('done', () => {
+        console.log('✅ Torrent descargado:', torrent.name);
+        ensureTorrentMetadata(torrentId);
+    });
+}
+
 app.post('/api/stream', (req, res) => {
     try {
         const magnet = req.body.magnet || req.body.magnetURI || req.body.link;
@@ -1270,9 +2076,15 @@ app.post('/api/stream', (req, res) => {
                 status: existing?.torrent?.ready ? 'ready' : 'adding',
                 name: existing?.name || 'Unknown',
                 files: existing?.files || [],
-                streamableFileIndex: existing?.streamableFileIndex ?? null
+                streamableFileIndex: existing?.streamableFileIndex ?? null,
+                fallbacksTried: existing?.fallbacksTried || 0
             });
         }
+
+        const alternatives = Array.isArray(req.body.alternatives)
+            ? req.body.alternatives.filter(Boolean).slice(0, MAX_STREAM_ALTERNATIVES)
+            : [];
+        const trackKey = req.body.trackKey ? String(req.body.trackKey) : null;
 
         console.log(`🎵 Añadiendo torrent: ${magnet.substring(0, 80)}...`);
 
@@ -1285,28 +2097,17 @@ app.post('/api/stream', (req, res) => {
             added: Date.now(),
             name: 'Cargando...',
             files: [],
-            streamableFileIndex: null
+            streamableFileIndex: null,
+            alternatives,
+            fallbacksTried: 0,
+            connectTimer: null,
+            trackKey
         };
 
         activeTorrents.set(torrentId, torrentData);
 
-        torrent.on('error', (err) => {
-            console.error('Torrent error:', err.message);
-            activeTorrents.delete(torrentId);
-        });
-
-        torrent.on('metadata', () => {
-            torrentData.name = torrent.name || torrentData.name;
-        });
-
-        torrent.on('ready', () => {
-            ensureTorrentMetadata(torrentId);
-        });
-
-        torrent.on('done', () => {
-            console.log('✅ Torrent descargado:', torrent.name);
-            ensureTorrentMetadata(torrentId);
-        });
+        attachTorrentEvents(torrentId);
+        scheduleConnectTimeout(torrentId);
 
         res.json({ torrentId, status: 'adding', name: torrentData.name });
 
@@ -1346,7 +2147,9 @@ app.get('/api/torrent/:id/status', (req, res) => {
             done: torrent.done,
             ready: torrent.ready,
             files: torrentData.files || [],
-            streamableFileIndex: torrentData.streamableFileIndex ?? null
+            streamableFileIndex: torrentData.streamableFileIndex ?? null,
+            fallbacksTried: torrentData.fallbacksTried || 0,
+            prefetching: torrentData.prefetching || false
         };
 
         res.json(status);

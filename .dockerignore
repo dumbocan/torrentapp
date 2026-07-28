@@ -1,0 +1,17 @@
+# Exclude local dependencies and artifacts from Docker build context
+node_modules
+npm-debug.log*
+logs
+*.log
+
+# Runtime directories mounted as volumes
+downloads
+config
+
+# Git metadata
+.git
+.gitignore
+
+# OS / editor files
+.DS_Store
+Thumbs.db

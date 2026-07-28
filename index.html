@@ -4,15 +4,21 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TorrentStream - Buscador y Reproductor de Torrents</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/tailwind.css?v=3">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/js/all.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/webtorrent@latest/webtorrent.min.js"></script>
+    <!-- SRI removido por mismatch en CDN; idealmente servir paquete local en producción -->
+    <script src="https://cdn.jsdelivr.net/npm/webtorrent@1.9.7/webtorrent.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' ry='20' fill='%231e293b'/%3E%3Cpath d='M25 70 L45 30 L55 30 L75 70 Z' fill='%2338bdf8'/%3E%3C/svg%3E">
     <style>
         body { font-family: 'Inter', sans-serif; }
         .gradient-bg { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); }
         .torrent-card { transition: all 0.3s ease; border-left: 4px solid transparent; }
         .torrent-card:hover { transform: translateY(-2px); border-color: #38bdf8; }
+        .album-card { border-left-color: #a855f7; background: rgba(15,23,42,0.7); }
+        .album-card:hover { border-color: #c084fc; }
+        .spotlight-hero { background: linear-gradient(120deg, rgba(99,102,241,0.15), rgba(14,165,233,0.2)); border: 1px solid rgba(148,163,184,0.2); }
+        .spotlight-cover img { box-shadow: 0 15px 40px rgba(15,23,42,0.5); }
         .search-container { background: rgba(15, 23, 42, 0.85); }
         .hero-backdrop::before {
             content: '';
@@ -55,9 +61,42 @@
     </header>
 
     <!-- Main Content -->
+    
     <main class="container mx-auto px-4 py-8">
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+            <aside class="lg:col-span-3 hidden lg:block">
+                <div class="sticky top-24 space-y-5">
+                    <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6">
+                        <h3 class="text-slate-300 text-sm uppercase tracking-[0.3em] mb-4">Navegación</h3>
+                        <nav class="space-y-3 text-slate-300">
+                            <button class="w-full flex items-center space-x-3 px-3 py-2 rounded-xl hover:bg-slate-800 transition" data-section="results">
+                                <i class="fas fa-music text-blue-400"></i>
+                                <span>Música</span>
+                            </button>
+                            <button class="w-full flex items-center space-x-3 px-3 py-2 rounded-xl hover:bg-slate-800 transition" data-section="albumDetail">
+                                <i class="fas fa-compact-disc text-purple-400"></i>
+                                <span>Álbumes</span>
+                            </button>
+                            <button class="w-full flex items-center space-x-3 px-3 py-2 rounded-xl hover:bg-slate-800 transition" data-section="queue">
+                                <i class="fas fa-list text-emerald-400"></i>
+                                <span>Cola</span>
+                            </button>
+                            <button class="w-full flex items-center space-x-3 px-3 py-2 rounded-xl hover:bg-slate-800 transition" data-section="downloads">
+                                <i class="fas fa-download text-amber-400"></i>
+                                <span>Descargas</span>
+                            </button>
+                        </nav>
+                    </div>
+                    <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6">
+                        <h3 class="text-slate-300 text-sm uppercase tracking-[0.3em] mb-4">Biblioteca</h3>
+                        <p class="text-slate-400 text-sm">Tus búsquedas recientes y álbumes destacados aparecerán aquí.</p>
+                    </div>
+                </div>
+            </aside>
+            <div class="lg:col-span-9 space-y-8">
+
         <!-- Search Section -->
-        <section class="mb-10 relative rounded-3xl overflow-hidden hero-backdrop">
+        <section class="mb-10 relative rounded-3xl overflow-hidden hero-backdrop lg:col-span-12">
             <div id="heroBackdrop" class="absolute inset-0 bg-cover bg-center opacity-30"></div>
             <div class="search-container relative rounded-3xl p-8 border border-slate-700">
                 <div class="max-w-4xl mx-auto text-center mb-8">
@@ -115,6 +154,98 @@
                     </div>
                 </div>
             </div>
+    </section>
+
+        <!-- Artist Spotlight -->
+        <section id="artistSpotlight" class="hidden mb-10 lg:col-span-9">
+            <div id="artistSpotlightHero" class="spotlight-hero rounded-3xl p-6 md:p-10">
+                <div class="flex flex-col md:flex-row items-center md:items-start gap-8">
+                    <div class="w-36 h-36 md:w-44 md:h-44 rounded-3xl overflow-hidden bg-slate-900 flex items-center justify-center spotlight-cover" id="artistSpotlightCover">
+                        <i class="fas fa-compact-disc text-3xl text-slate-500"></i>
+                    </div>
+                    <div class="flex-1 text-center md:text-left">
+                        <p class="text-xs uppercase tracking-[0.3em] text-slate-300 mb-2">Artista destacado</p>
+                        <h3 id="artistSpotlightTitle" class="text-3xl md:text-4xl font-bold mb-2">Álbum o artista</h3>
+                        <p id="artistSpotlightArtist" class="text-lg text-slate-200 mb-3">Nombre del artista</p>
+                        <p id="artistSpotlightSummary" class="text-sm text-slate-300 mb-5">Resumen o descripción del artista/álbum.</p>
+                        <div class="flex flex-wrap justify-center md:justify-start gap-3">
+                            <button id="artistSpotlightPlay" class="bg-white text-slate-900 px-5 py-3 rounded-full font-semibold flex items-center space-x-2">
+                                <i class="fas fa-play"></i><span>Reproducir ahora</span>
+                            </button>
+                            <button id="artistSpotlightQueue" class="bg-slate-800 border border-slate-600 px-5 py-3 rounded-full flex items-center space-x-2 text-sm">
+                                <i class="fas fa-list"></i><span>Añadir a cola</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Album Detail Section -->
+        <section id="albumDetailSection" class="hidden mb-12 lg:col-span-9">
+            <div class="rounded-3xl overflow-hidden border border-slate-700">
+                <div id="albumDetailHero" class="bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-8 md:p-12">
+                    <button id="albumDetailBack" class="mb-6 text-sm text-slate-300 hover:text-white transition-colors flex items-center space-x-2">
+                        <i class="fas fa-arrow-left"></i>
+                        <span>Volver a resultados</span>
+                    </button>
+                    <div class="flex flex-col md:flex-row items-start gap-8">
+                        <div class="w-48 h-48 rounded-3xl overflow-hidden bg-slate-900 flex items-center justify-center" id="albumDetailCover">
+                            <i class="fas fa-compact-disc text-3xl text-slate-500"></i>
+                        </div>
+                        <div class="flex-1 text-left">
+                            <p class="text-sm uppercase tracking-[0.2em] text-slate-300 mb-2">Álbum</p>
+                            <h2 id="albumDetailTitle" class="text-4xl md:text-5xl font-bold mb-3">Nombre del álbum</h2>
+                            <p id="albumDetailArtist" class="text-xl text-slate-300 mb-4">Artista</p>
+                            <div class="flex flex-wrap gap-4 text-sm text-slate-300">
+                                <span id="albumDetailMetaTracks"><i class="fas fa-music mr-1"></i>0 pistas</span>
+                                <span id="albumDetailMetaSize"><i class="fas fa-database mr-1"></i>0 MB</span>
+                                <span id="albumDetailMetaSource"><i class="fas fa-folder-open mr-1"></i>Origen</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="bg-slate-900/80 p-6 md:p-8">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="flex items-center gap-4">
+                            <button id="albumDetailPlay" class="bg-emerald-500 hover:bg-emerald-600 text-white px-5 py-3 rounded-full flex items-center space-x-2 shadow-lg shadow-emerald-500/30">
+                                <i class="fas fa-play"></i>
+                                <span>Reproducir álbum</span>
+                            </button>
+                            <button id="albumDetailQueue" class="bg-slate-800 hover:bg-slate-700 px-5 py-3 rounded-full flex items-center space-x-2 border border-slate-700">
+                                <i class="fas fa-list"></i>
+                                <span>Añadir a cola</span>
+                            </button>
+                        </div>
+                        <p id="albumDetailDescription" class="text-sm text-slate-400 max-w-xl text-right md:text-left md:max-w-none"></p>
+                    </div>
+                    <div class="mt-6">
+                        <div class="overflow-x-auto rounded-2xl border border-slate-800">
+                            <table class="w-full text-sm text-slate-300">
+                                <thead class="bg-slate-900/60 text-xs uppercase tracking-wider text-slate-400">
+                                    <tr>
+                                        <th class="text-left px-4 py-2">#</th>
+                                        <th class="text-left px-4 py-2">Canción</th>
+                                        <th class="text-left px-4 py-2">Duración</th>
+                                        <th class="text-right px-4 py-2">Acciones</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="albumDetailTracklist" class="divide-y divide-slate-800 bg-slate-900/40">
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Search Status -->
+        <section id="searchStatus" class="hidden mb-6 bg-slate-900/40 border border-slate-800 rounded-xl p-4 lg:col-span-9">
+            <div class="flex items-center justify-between mb-2">
+                <p class="text-sm font-semibold text-slate-200">Actividad de búsqueda</p>
+                <button id="clearStatusBtn" class="text-xs text-slate-400 hover:text-white transition-colors">Limpiar</button>
+            </div>
+            <div id="searchStatusLog" class="space-y-1 max-h-32 overflow-y-auto text-sm text-slate-300"></div>
         </section>
 
         <!-- Loading State -->
@@ -124,7 +255,7 @@
         </div>
 
         <!-- Results Section -->
-        <section id="resultsSection" class="hidden mb-8">
+        <section id="resultsSection" class="hidden mb-8 lg:col-span-9">
             <h3 class="text-2xl font-bold mb-6">Resultados de búsqueda</h3>
             <div id="torrentResults" class="grid gap-4">
                 <!-- Torrent results will be inserted here -->
@@ -132,7 +263,7 @@
         </section>
 
         <!-- Player Section -->
-        <section id="playerSection" class="hidden mb-8">
+        <section id="playerSection" class="hidden mb-8 lg:col-span-9">
             <div class="player-container rounded-2xl p-6 border border-slate-700">
                 <div class="flex items-center gap-4">
                     <div id="nowPlayingCover" class="w-20 h-20 rounded-xl bg-slate-800 flex items-center justify-center text-slate-500">
@@ -166,6 +297,11 @@
                         <div>Descarga: <span id="downloadSpeed" class="text-white font-semibold">0 KB/s</span></div>
                         <div class="md:text-right">Subida: <span id="uploadSpeed" class="text-white font-semibold">0 KB/s</span></div>
                     </div>
+                    <div class="mt-3">
+                        <p class="text-xs text-slate-500 mb-1">Estado de reproducción</p>
+                        <div id="playbackProgressSummary" class="text-xs text-slate-300 mb-2">Sin actividad.</div>
+                        <div id="playbackStatus" class="bg-slate-900/40 rounded-lg p-3 space-y-1 max-h-32 overflow-y-auto text-xs text-slate-300"></div>
+                    </div>
                 </div>
 
                 <audio id="audioPlayer" class="w-full mt-4" controls></audio>
@@ -173,7 +309,7 @@
         </section>
 
         <!-- Active Downloads -->
-        <section id="downloadsSection" class="mb-8">
+        <section id="downloadsSection" class="mb-8 lg:col-span-3 bg-slate-900/50 rounded-2xl border border-slate-800 p-5 h-fit">
             <h3 class="text-2xl font-bold mb-6">Descargas Activas</h3>
             <div id="activeDownloads" class="space-y-4">
                 <!-- Active downloads will be shown here -->
@@ -181,7 +317,7 @@
         </section>
 
         <!-- Playback Queue -->
-        <section id="queueSection" class="mb-8">
+        <section id="queueSection" class="mb-8 lg:col-span-3 bg-slate-900/50 rounded-2xl border border-slate-800 p-5 h-fit">
             <div class="flex items-center justify-between mb-4">
                 <div>
                     <h3 class="text-2xl font-bold">Cola de reproducción</h3>
@@ -204,6 +340,24 @@
                 <!-- Suggestions will be injected here -->
             </div>
         </section>
+        <!-- Album Gallery -->
+        <section id="albumGallerySection" class="hidden mb-10 lg:col-span-9">
+            <div class="bg-slate-900/50 border border-slate-800 rounded-3xl p-6">
+                <div class="flex items-center justify-between mb-6">
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.3em] text-slate-400 mb-2">Biblioteca</p>
+                        <h3 class="text-2xl font-bold text-white">Tus álbumes</h3>
+                    </div>
+                    <button id="albumGalleryClose" class="text-sm text-slate-400 hover:text-white transition-colors hidden">
+                        <i class="fas fa-times mr-2"></i>Ocultar
+                    </button>
+                </div>
+                <div id="albumGalleryGrid" class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-6">
+                </div>
+            </div>
+        </section>
+            </div>
+        </div>
     </main>
 
     <!-- Footer -->
@@ -213,6 +367,6 @@
         </div>
     </footer>
 
-    <script src="main.js"></script>
+    <script src="main.js?v=4"></script>
 </body>
 </html>
